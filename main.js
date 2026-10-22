@@ -8,6 +8,8 @@ const AUDIO_EXT = ['mp3', 'wav', 'ogg', 'oga', 'opus', 'm4a', 'aac', 'flac', 'we
 const MAX_AUDIO_BYTES = 512 * 1024 * 1024;
 const MAX_SCAN_FILES = 5000;
 
+// The packaged exe is named "Soundpad Improved": keep the profile of `npm start` all the same.
+app.setPath('userData', path.join(app.getPath('appData'), 'soundpad-improved'));
 // Dev/test hooks: isolated profile, and a screenshot of the window after load.
 if (process.env.SPI_USER_DATA) app.setPath('userData', process.env.SPI_USER_DATA);
 

@@ -29,9 +29,21 @@ le câble comme un micro.
 
 ## Installation
 
+Le plus simple : télécharge `Soundpad-Improved-<version>.exe` dans les Releases du dépôt. La CI en
+publie une à chaque push sur `main` dont les tests passent. C'est un exe portable, sans installation :
+il démarre en quelques secondes, le temps de se décompresser. Il n'est pas signé, donc Windows
+SmartScreen peut afficher « Windows a protégé votre ordinateur » : « Informations complémentaires »,
+puis « Exécuter quand même ». Il garde la même bibliothèque que `npm start`.
+
+Depuis les sources :
+
 1. Dans ce dossier, lance `npm install`.
 2. Compile le filtre micro : `npm run build:native`. Il faut le g++ de MSYS2 (UCRT64) dans le PATH.
-3. Lance l'appli : double-clic sur `Lancer.cmd` (ou `npm start`).
+3. Lance l'appli : double-clic sur `Lancer.cmd` (ou `npm start`). `npm run dist` fabrique l'exe
+   portable dans `dist/`.
+
+Puis, dans l'appli :
+
 4. Réglages, Envoi aux autres : **« Mon micro, avec le filtre (comme Soundpad) »**, puis
    « Installer le filtre ». Windows demande l'autorisation administrateur, et le son du PC se coupe
    une seconde le temps de redémarrer le service audio. Dans Discord, garde ton micro habituel.
