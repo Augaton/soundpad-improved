@@ -1,0 +1,16 @@
+{
+  "name": "soundpad-improved",
+  "version": "0.1.0",
+  "description": "Soundboard polyphonique : plusieurs sons à la fois, volume réglable en direct, import de la bibliothèque Soundpad.",
+  "main": "main.js",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "test": "node --test test/*.test.mjs",
+    "build:native": "native\\build.cmd",
+    "test:native": "native\\bin\\test_apo.exe native\\bin"
+  },
+  "devDependencies": {
+    "electron": "~44.9.3"
+  }
+}

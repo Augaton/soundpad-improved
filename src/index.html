@@ -1,0 +1,223 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:">
+  <title>Soundpad Improved</title>
+  <link rel="stylesheet" href="style.css">
+  <script type="module" src="app.mjs"></script>
+</head>
+<body>
+  <header class="topbar">
+    <h1 class="brand">Soundpad Improved</h1>
+    <input id="search" class="search" type="search" placeholder="Rechercher un son (Ctrl+F)" aria-label="Rechercher un son">
+    <label class="sort">
+      <span>Tri</span>
+      <select id="sort">
+        <option value="added">Ordre d'ajout</option>
+        <option value="title">Titre</option>
+        <option value="plays">Les plus joués</option>
+      </select>
+    </label>
+    <div class="topbar-actions">
+      <button type="button" class="btn" id="btn-add">Ajouter des sons</button>
+      <button type="button" class="btn" id="btn-import">Importer Soundpad</button>
+      <button type="button" class="btn" id="btn-settings">Réglages</button>
+      <button type="button" class="btn btn-danger" id="btn-stop-all">Tout arrêter</button>
+    </div>
+  </header>
+
+  <div id="banner" class="banner" role="status" hidden>
+    <p id="banner-text"></p>
+    <button type="button" class="btn" id="banner-download">Télécharger VB-Cable</button>
+    <button type="button" class="btn" id="banner-settings">Réglages</button>
+  </div>
+
+  <main class="layout">
+    <nav class="sidebar" aria-label="Catégories">
+      <ul id="categories" class="categories"></ul>
+      <form id="new-category" class="new-category">
+        <label for="new-category-name">Nouvelle catégorie</label>
+        <div class="inline">
+          <input id="new-category-name" maxlength="60" autocomplete="off">
+          <button type="submit" class="btn">Créer</button>
+        </div>
+      </form>
+    </nav>
+
+    <section class="library" aria-label="Sons">
+      <div id="grid" class="grid"></div>
+      <div id="empty" class="empty" hidden>
+        <p id="empty-title" class="empty-title"></p>
+        <p id="empty-text"></p>
+        <div class="empty-actions" id="empty-actions">
+          <button type="button" class="btn btn-primary" id="empty-import" hidden>Importer depuis Soundpad</button>
+          <button type="button" class="btn" id="empty-add">Ajouter des sons</button>
+        </div>
+      </div>
+    </section>
+
+    <aside class="playing" aria-labelledby="playing-title">
+      <h2 id="playing-title">En cours <span id="voice-count" class="count"></span></h2>
+      <p id="voices-empty" class="muted">Rien en cours. Clique sur un son ou utilise un raccourci : plusieurs sons peuvent jouer en même temps.</p>
+      <ul id="voices" class="voices"></ul>
+
+      <div class="mixer">
+        <h3>Volumes</h3>
+        <label class="slider">
+          <span>Casque</span>
+          <input type="range" id="vol-monitor" min="0" max="200" step="1">
+          <output for="vol-monitor"></output>
+        </label>
+        <label class="slider">
+          <span>Sons dans le micro</span>
+          <input type="range" id="vol-cable" min="0" max="200" step="1">
+          <output for="vol-cable"></output>
+        </label>
+        <label class="slider">
+          <span>Ta voix</span>
+          <input type="range" id="vol-mic" min="0" max="200" step="1">
+          <output for="vol-mic"></output>
+        </label>
+        <div class="meter-row">
+          <span>Ce que les autres entendent</span>
+          <div class="meter" role="meter" aria-label="Niveau des sons envoyés aux autres" aria-valuemin="0" aria-valuemax="100" aria-valuenow="0"><div id="meter-cable" class="meter-fill"></div></div>
+        </div>
+      </div>
+    </aside>
+  </main>
+
+  <dialog id="dlg-sound" class="dialog" aria-labelledby="dlg-sound-title">
+    <form method="dialog" id="form-sound">
+      <h2 id="dlg-sound-title">Modifier le son</h2>
+      <label class="field">
+        <span>Titre</span>
+        <input name="title" required maxlength="200" autocomplete="off">
+      </label>
+      <div class="field-row">
+        <label class="field">
+          <span>Volume par défaut <output name="volumeOut"></output></span>
+          <input type="range" name="volume" min="0" max="200" step="1">
+        </label>
+        <label class="field">
+          <span>Vitesse par défaut <output name="rateOut"></output></span>
+          <input type="range" name="rate" min="50" max="200" step="5">
+        </label>
+      </div>
+      <label class="field">
+        <span>Si on le relance pendant qu'il joue</span>
+        <select name="mode">
+          <option value="default">Réglage général</option>
+          <option value="overlap">Le superposer (plusieurs fois en même temps)</option>
+          <option value="restart">Le redémarrer depuis le début</option>
+          <option value="toggle">L'arrêter (bascule lecture / arrêt)</option>
+        </select>
+      </label>
+      <div class="field">
+        <span id="sound-hotkey-label">Raccourci clavier global</span>
+        <div class="hotkey-field">
+          <button type="button" class="btn hotkey-btn" id="sound-hotkey" aria-describedby="sound-hotkey-label"></button>
+          <button type="button" class="btn" id="sound-hotkey-clear">Effacer</button>
+        </div>
+        <p class="field-error" id="sound-hotkey-error" hidden></p>
+      </div>
+      <fieldset class="field">
+        <legend>Catégories</legend>
+        <div id="sound-categories" class="checks"></div>
+      </fieldset>
+      <label class="check"><input type="checkbox" name="favorite"> Favori</label>
+      <p class="path" id="sound-path"></p>
+      <div class="dialog-actions">
+        <button type="button" class="btn btn-danger-text" id="sound-delete">Retirer de la bibliothèque</button>
+        <span class="spacer"></span>
+        <button type="button" class="btn" id="sound-preview">Écouter</button>
+        <button type="button" class="btn" id="sound-cancel">Annuler</button>
+        <button type="submit" class="btn btn-primary" value="save">Enregistrer</button>
+      </div>
+    </form>
+  </dialog>
+
+  <dialog id="dlg-settings" class="dialog dialog-wide" aria-labelledby="dlg-settings-title">
+    <form method="dialog">
+      <h2 id="dlg-settings-title">Réglages</h2>
+
+      <section class="settings-section">
+        <h3>Sorties audio</h3>
+        <label class="field">
+          <span>Casque : ce que tu entends</span>
+          <select id="set-monitor"></select>
+        </label>
+        <label class="field">
+          <span>Envoi aux autres : ce que Discord et les jeux entendent</span>
+          <select id="set-cable"></select>
+        </label>
+        <p class="hint" id="cable-hint"></p>
+        <div id="filter-box" class="filter-box" hidden>
+          <p id="filter-status" role="status"></p>
+          <div class="filter-actions">
+            <button type="button" class="btn btn-primary" id="filter-install">Installer le filtre</button>
+            <button type="button" class="btn" id="filter-uninstall">Retirer le filtre</button>
+          </div>
+        </div>
+      </section>
+
+      <section class="settings-section">
+        <h3>Ta voix</h3>
+        <p class="hint" id="voice-hint" hidden>Avec le filtre, ta voix passe déjà par ton vrai micro : l'appli n'y touche pas.</p>
+        <label class="check"><input type="checkbox" id="set-mic-enabled"> Mélanger ma voix dans le micro virtuel</label>
+        <label class="field">
+          <span>Micro</span>
+          <select id="set-mic"></select>
+        </label>
+        <label class="check"><input type="checkbox" id="set-mic-ns"> Réduction de bruit sur ma voix</label>
+      </section>
+
+      <section class="settings-section">
+        <h3>Lecture</h3>
+        <label class="field">
+          <span>Quand on relance un son qui joue déjà</span>
+          <select id="set-mode">
+            <option value="overlap">Le superposer (plusieurs fois en même temps)</option>
+            <option value="restart">Le redémarrer depuis le début</option>
+            <option value="toggle">L'arrêter (bascule lecture / arrêt)</option>
+          </select>
+        </label>
+        <label class="check"><input type="checkbox" id="set-exclusive"> Un seul son à la fois : un nouveau son coupe les autres (comme Soundpad)</label>
+        <label class="check"><input type="checkbox" id="set-normalize"> Égaliser le volume des sons (les sons trop forts sont baissés, les faibles remontés)</label>
+        <label class="field field-narrow">
+          <span>Sons simultanés au maximum</span>
+          <input type="number" id="set-max" min="1" max="64" step="1">
+        </label>
+      </section>
+
+      <section class="settings-section">
+        <h3>Raccourcis globaux</h3>
+        <div class="hotkey-grid">
+          <span id="hk-stopAll-label">Tout arrêter</span>
+          <button type="button" class="btn hotkey-btn" data-action="stopAll" aria-describedby="hk-stopAll-label"></button>
+          <button type="button" class="btn" data-clear="stopAll">Effacer</button>
+          <span id="hk-pauseAll-label">Pause / reprise de tout</span>
+          <button type="button" class="btn hotkey-btn" data-action="pauseAll" aria-describedby="hk-pauseAll-label"></button>
+          <button type="button" class="btn" data-clear="pauseAll">Effacer</button>
+          <span id="hk-volUp-label">Monter le volume des sons en cours</span>
+          <button type="button" class="btn hotkey-btn" data-action="volUp" aria-describedby="hk-volUp-label"></button>
+          <button type="button" class="btn" data-clear="volUp">Effacer</button>
+          <span id="hk-volDown-label">Baisser le volume des sons en cours</span>
+          <button type="button" class="btn hotkey-btn" data-action="volDown" aria-describedby="hk-volDown-label"></button>
+          <button type="button" class="btn" data-clear="volDown">Effacer</button>
+        </div>
+        <p class="field-error" id="settings-hotkey-error" hidden></p>
+        <p class="hint">Un raccourci global marche partout, même en jeu, mais sa touche n'arrive plus aux autres applis. Préfère le pavé numérique, Pause, F13 à F24 ou une combinaison avec Ctrl ou Alt.</p>
+      </section>
+
+      <div class="dialog-actions">
+        <span class="spacer"></span>
+        <button type="submit" class="btn btn-primary" value="close">Fermer</button>
+      </div>
+    </form>
+  </dialog>
+
+  <div id="drop-hint" class="drop-hint" hidden>Dépose tes fichiers audio ou dossiers pour les ajouter</div>
+  <div id="toasts" class="toasts" role="status" aria-live="polite"></div>
+</body>
+</html>

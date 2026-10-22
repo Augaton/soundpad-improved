@@ -1,0 +1,4 @@
+LIBRARY SoundpadImprovedApo
+EXPORTS
+  DllGetClassObject PRIVATE
+  DllCanUnloadNow PRIVATE
