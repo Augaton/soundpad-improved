@@ -37,7 +37,6 @@ function Get-Microphones {
     [pscustomobject]@{
       Id        = $ep.PSChildName
       Name      = "$($props.$NameKey) ($($props.$InterfaceKey))" # the label Chromium shows
-      FxPath    = $fxPath
       HasFx     = $null -ne $fx
       Efx       = if ($fx) { $fx.$EfxKey } else { $null }
       Composite = if ($fx) { $fx.$CompositeEfxKey } else { $null }
@@ -51,6 +50,21 @@ function Get-Microphones {
 function Test-Eligible($mic) {
   $mic.HasFx -and $mic.Name -notmatch 'CABLE|VB-Audio|Voicemeeter' -and -not $mic.Composite -and
   (-not $mic.Efx -or $mic.Efx -eq $SoundpadClsid -or $mic.Efx -eq $Clsid)
+}
+
+# FxProperties grants administrators SetValue only. PowerShell's registry cmdlets open keys with
+# KEY_WRITE, which also asks for CreateSubKey, and are refused: open the key with just the rights
+# granted. $Value $null deletes the value.
+function Set-FxValue($EndpointId, $Name, $Value, [Microsoft.Win32.RegistryValueKind]$Kind) {
+  $key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey(
+    "SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Capture\$EndpointId\FxProperties",
+    [Microsoft.Win32.RegistryKeyPermissionCheck]::ReadWriteSubTree,
+    [Security.AccessControl.RegistryRights]'SetValue, QueryValues')
+  try {
+    if ($null -eq $Value) { $key.DeleteValue($Name, $false) } else { $key.SetValue($Name, $Value, $Kind) }
+  } finally {
+    $key.Close()
+  }
 }
 
 function Assert-Admin {
@@ -102,10 +116,8 @@ function Install-Filter {
         if ($mic.Efx) { New-ItemProperty $bk 'Efx' -Value $mic.Efx -PropertyType String | Out-Null }
         if ($mic.Modes) { New-ItemProperty $bk 'Modes' -Value $mic.Modes -PropertyType MultiString | Out-Null }
       }
-      New-ItemProperty $mic.FxPath $EfxKey -Value $Clsid -PropertyType String -Force | Out-Null
-      if (-not $mic.Modes) {
-        New-ItemProperty $mic.FxPath $EfxModesKey -Value @($DefaultMode) -PropertyType MultiString -Force | Out-Null
-      }
+      Set-FxValue $mic.Id $EfxKey $Clsid String
+      if (-not $mic.Modes) { Set-FxValue $mic.Id $EfxModesKey ([string[]]@($DefaultMode)) MultiString }
     }
   } finally {
     Start-Service Audiosrv
@@ -118,14 +130,13 @@ function Uninstall-Filter {
   Stop-Service Audiosrv -Force # releases the DLL
   try {
     foreach ($bk in @(Get-ChildItem $Backup -ErrorAction SilentlyContinue)) {
-      $fxPath = "$Capture\$($bk.PSChildName)\FxProperties"
-      $fx = Get-ItemProperty $fxPath -ErrorAction SilentlyContinue
+      $id = $bk.PSChildName
+      $fx = Get-ItemProperty "$Capture\$id\FxProperties" -ErrorAction SilentlyContinue
       if ($fx -and $fx.$EfxKey -eq $Clsid) { # if Soundpad took the slot back, leave it
         $saved = Get-ItemProperty $bk.PSPath
-        if ($saved.Efx) { New-ItemProperty $fxPath $EfxKey -Value $saved.Efx -PropertyType String -Force | Out-Null }
-        else { Remove-ItemProperty $fxPath $EfxKey }
-        if ($saved.Modes) { New-ItemProperty $fxPath $EfxModesKey -Value $saved.Modes -PropertyType MultiString -Force | Out-Null }
-        elseif ($null -ne $fx.$EfxModesKey) { Remove-ItemProperty $fxPath $EfxModesKey }
+        Set-FxValue $id $EfxKey $saved.Efx String # no saved value: deleted
+        if ($saved.Modes) { Set-FxValue $id $EfxModesKey ([string[]]$saved.Modes) MultiString }
+        elseif ($null -ne $fx.$EfxModesKey) { Set-FxValue $id $EfxModesKey $null String }
       }
       Remove-Item $bk.PSPath -Recurse
     }
