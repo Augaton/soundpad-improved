@@ -1,4 +1,6 @@
 // The sound editor, the settings, and confirmations.
+use std::sync::mpsc::{Receiver, TryRecvError};
+
 use eframe::egui::{
     self, Button, ComboBox, Context, Frame, Grid, Id, Key, Margin, Modal, RichText, ScrollArea,
     Stroke, TextEdit, Ui, vec2,
@@ -55,6 +57,25 @@ impl Editor {
                 .collect(),
             path: sound.path.clone(),
             missing,
+        }
+    }
+}
+
+/// "Ajouter depuis un lien": the link typed or pasted, and the download under way.
+pub struct LinkDialog {
+    url: String,
+    error: Option<String>,
+    pending: Option<Receiver<Result<String, String>>>,
+    focus: bool,
+}
+
+impl LinkDialog {
+    pub fn new(url: &str) -> LinkDialog {
+        LinkDialog {
+            url: url.to_string(),
+            error: None,
+            pending: None,
+            focus: true,
         }
     }
 }
@@ -171,6 +192,9 @@ impl App {
         }
         if self.settings {
             self.settings_ui(ctx, lib, status);
+        }
+        if self.link.is_some() {
+            self.link_ui(ctx);
         }
         if self.confirm.is_some() {
             self.confirm_ui(ctx);
@@ -594,6 +618,88 @@ impl App {
                 self.finish_capture(None);
             }
             self.settings = false;
+        }
+    }
+
+    // ---------- Adding from a link ----------
+
+    fn link_ui(&mut self, ctx: &Context) {
+        let escape = self.escape(ctx);
+        let category = self.view_category();
+        let Some(d) = self.link.as_mut() else { return };
+        if let Some(rx) = &d.pending {
+            match rx.try_recv() {
+                Ok(Ok(title)) => {
+                    self.core.toast(format!("« {title} » ajouté"), false);
+                    self.link = None;
+                    return;
+                }
+                Ok(Err(e)) => {
+                    d.error = Some(e);
+                    d.pending = None;
+                }
+                Err(TryRecvError::Empty) => {
+                    ctx.request_repaint_after(std::time::Duration::from_millis(100))
+                }
+                Err(TryRecvError::Disconnected) => {
+                    d.error = Some("téléchargement interrompu".into());
+                    d.pending = None;
+                }
+            }
+        }
+        let busy = d.pending.is_some();
+        let (mut add, mut cancel) = (false, false);
+        let dir = crate::store::sounds_dir();
+        Modal::new(Id::unique("link")).frame(dialog_frame()).backdrop_color(egui::Color32::from_black_alpha(150)).show(ctx, |ui| {
+            ui.set_width(480.0);
+            ui.label(RichText::new("Ajouter depuis un lien").heading());
+            ui.add_space(12.0);
+            field_label(ui, "Lien du son");
+            let edit = ui.add_enabled(
+                !busy,
+                TextEdit::singleline(&mut d.url).hint_text("https://tuna.voicemod.net/sound/…").desired_width(f32::INFINITY),
+            );
+            if std::mem::take(&mut d.focus) {
+                edit.request_focus();
+            }
+            add = edit.lost_focus() && ui.input(|i| i.key_pressed(Key::Enter));
+            ui.add_space(2.0);
+            hint(
+                ui,
+                &format!(
+                    "Une page de son Voicemod Tuna ou MyInstants, ou un lien direct vers un fichier audio. Le son est enregistré dans {}.",
+                    dir.display()
+                ),
+            );
+            ui.horizontal(|ui| {
+                if ui.link("Parcourir Voicemod Tuna").clicked() {
+                    crate::open_url("https://tuna.voicemod.net/sounds/");
+                }
+                if ui.link("Parcourir MyInstants").clicked() {
+                    crate::open_url("https://www.myinstants.com/");
+                }
+            });
+            if let Some(e) = &d.error {
+                ui.add(egui::Label::new(RichText::new(e).color(DANGER)).wrap());
+            }
+            ui.add_space(14.0);
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if busy {
+                    ui.label(RichText::new("Téléchargement…").color(TEXT_2));
+                    ui.spinner();
+                } else {
+                    add |= ui.add_enabled_ui(!d.url.trim().is_empty(), |ui| primary(ui, "Ajouter")).inner.clicked();
+                    cancel = ui.button("Annuler").clicked();
+                }
+            });
+        });
+        if cancel || escape {
+            self.link = None; // a download under way still ends with a toast
+            return;
+        }
+        if add && !busy && !d.url.trim().is_empty() {
+            d.error = None;
+            d.pending = Some(self.core.add_link(d.url.trim().to_string(), category));
         }
     }
 

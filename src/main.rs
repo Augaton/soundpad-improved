@@ -5,6 +5,7 @@ mod audio;
 mod filter;
 mod hotkeys;
 mod keys;
+mod link;
 mod model;
 mod soundpad;
 mod state;
@@ -37,8 +38,17 @@ pub fn open_url(url: &str) {
 }
 
 /// A second instance would fight the first one over the hotkeys: it brings the first one up.
+/// A test profile (SPI_USER_DATA) runs beside the everyday one.
 fn already_running() -> bool {
-    let mutex = unsafe { CreateMutexW(None, false, w!("Local\\SoundpadImprovedInstance")) };
+    let mut name = "Local\\SoundpadImprovedInstance".to_string();
+    if let Some(dir) = std::env::var_os("SPI_USER_DATA") {
+        use std::hash::{BuildHasher, BuildHasherDefault};
+        let hash = BuildHasherDefault::<std::collections::hash_map::DefaultHasher>::default()
+            .hash_one(dir);
+        name += &format!("-{hash:x}");
+    }
+    let name: Vec<u16> = name.encode_utf16().chain([0]).collect();
+    let mutex = unsafe { CreateMutexW(None, false, PCWSTR(name.as_ptr())) };
     if mutex.is_err() || unsafe { GetLastError() } != ERROR_ALREADY_EXISTS {
         std::mem::forget(mutex); // held until the process exits
         return false;

@@ -3,7 +3,7 @@
 use std::collections::HashSet;
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
-use std::sync::mpsc::{self, RecvTimeoutError, Sender};
+use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SendError, Sender};
 use std::sync::{Arc, Mutex, MutexGuard, OnceLock, Weak};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -13,6 +13,7 @@ use crate::audio::mixer::{CABLE, MONITOR};
 use crate::filter::{self, FilterAction};
 use crate::hotkeys::Hotkeys;
 use crate::keys;
+use crate::link;
 use crate::model::{
     Action, Cable, Device, FilterStatus, GlobalAction, Library, Mode, Sound, effective_mode,
     is_virtual_cable, plan_play,
@@ -502,6 +503,54 @@ impl Core {
             },
             false,
         );
+    }
+
+    /// Downloads the sound behind a link (Voicemod Tuna, MyInstants, an audio file) and adds
+    /// it. The answer comes on the receiver: its title, or why not; with nobody left to read it
+    /// (the dialog was closed), it becomes a toast.
+    pub fn add_link(
+        self: &Arc<Core>,
+        url: String,
+        category: Option<String>,
+    ) -> Receiver<Result<String, String>> {
+        let (tx, rx) = mpsc::channel();
+        let core = self.clone();
+        thread::spawn(move || {
+            let dir = store::sounds_dir();
+            let known = |title: &str| {
+                core.read(|l| {
+                    l.sounds.iter().any(|s| {
+                        s.title.eq_ignore_ascii_case(title) && Path::new(&s.path).starts_with(&dir)
+                    })
+                })
+            };
+            let result = link::download(&url, &dir, known).map(|d| {
+                core.add_sound(&d.path, &d.title, d.duration, category.as_deref());
+                d.title
+            });
+            match tx.send(result) {
+                Ok(()) => {}
+                Err(SendError(Ok(title))) => core.toast(format!("« {title} » ajouté"), false),
+                Err(SendError(Err(e))) => core.toast(format!("Lien : {e}"), true),
+            }
+            core.repaint();
+        });
+        rx
+    }
+
+    fn add_sound(&self, path: &Path, title: &str, duration: f64, category: Option<&str>) {
+        let path = path.to_string_lossy().into_owned();
+        self.edit(|lib| {
+            let mut s = Sound::new(&path);
+            s.title = title.to_string();
+            s.duration = Some(duration);
+            if let Some(c) = category.and_then(|c| lib.categories.iter_mut().find(|x| x.id == c)) {
+                c.sound_ids.push(s.id.clone());
+            }
+            lib.sounds.push(s);
+        });
+        self.save_now();
+        self.engine.preload(&path);
     }
 
     pub fn import_soundpad(self: &Arc<Core>, file: &Path) {

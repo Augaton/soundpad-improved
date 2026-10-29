@@ -1,5 +1,11 @@
 // Look: cool dark greys, one amber accent, soft 6 px corners, Windows' own fonts.
 use std::sync::Arc;
+use std::sync::atomic::{AtomicIsize, Ordering};
+
+use windows::Win32::Foundation::{HWND, LPARAM, LRESULT, WPARAM};
+use windows::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
+use windows::Win32::UI::WindowsAndMessaging::{CallWindowProcW, WM_SETTINGCHANGE, WNDPROC};
+use windows::core::BOOL;
 
 use eframe::egui::{
     self, Color32, CornerRadius, FontData, FontDefinitions, FontFamily, FontId, Margin, Shadow,
@@ -31,6 +37,7 @@ pub const GAP: f32 = 8.0;
 // Segoe Fluent Icons (Windows 11), same code points in Segoe MDL2 Assets (Windows 10).
 pub const I_SEARCH: &str = "\u{E721}";
 pub const I_ADD: &str = "\u{E710}";
+pub const I_LINK: &str = "\u{E71B}";
 pub const I_SETTINGS: &str = "\u{E713}";
 pub const I_STOP: &str = "\u{E71A}";
 pub const I_PLAY: &str = "\u{E768}";
@@ -63,24 +70,64 @@ fn system_font(names: &[&str]) -> Option<Vec<u8>> {
 }
 
 /// A dark title bar, whatever the Windows theme (light app mode included).
+///
+/// egui asks winit for a dark window (ThemePreference::Dark in `install`), but winit forgets it
+/// and puts the system's theme back on every WM_SETTINGCHANGE Windows broadcasts: the window
+/// procedure is chained to set it dark again after.
 pub fn dark_title_bar(cc: &eframe::CreationContext<'_>) {
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use windows::Win32::Foundation::HWND;
-    use windows::Win32::Graphics::Dwm::{DWMWA_USE_IMMERSIVE_DARK_MODE, DwmSetWindowAttribute};
-    use windows::core::BOOL;
+    use windows::Win32::UI::WindowsAndMessaging::{
+        GWLP_WNDPROC, GetWindowLongPtrW, SetWindowLongPtrW,
+    };
     if let Ok(handle) = cc.window_handle()
         && let RawWindowHandle::Win32(h) = handle.as_raw()
     {
-        let on = BOOL(1);
-        let _ = unsafe {
-            DwmSetWindowAttribute(
-                HWND(h.hwnd.get() as _),
-                DWMWA_USE_IMMERSIVE_DARK_MODE,
-                (&raw const on).cast(),
-                size_of::<BOOL>() as u32,
-            )
-        };
+        let hwnd = HWND(h.hwnd.get() as _);
+        set_dark(hwnd);
+        unsafe {
+            PREVIOUS_WNDPROC.store(GetWindowLongPtrW(hwnd, GWLP_WNDPROC), Ordering::Relaxed);
+            SetWindowLongPtrW(hwnd, GWLP_WNDPROC, keep_dark as *const () as isize);
+        }
     }
+}
+
+static PREVIOUS_WNDPROC: AtomicIsize = AtomicIsize::new(0);
+
+/// The attribute, then a redraw of the frame: DWM does not always repaint the caption by itself.
+fn set_dark(hwnd: HWND) {
+    use windows::Win32::UI::WindowsAndMessaging::{
+        IsWindowVisible, SWP_FRAMECHANGED, SWP_NOACTIVATE, SWP_NOMOVE, SWP_NOSIZE, SWP_NOZORDER,
+        SetWindowPos,
+    };
+    let on = BOOL(1);
+    unsafe {
+        let _ = DwmSetWindowAttribute(
+            hwnd,
+            DWMWA_USE_IMMERSIVE_DARK_MODE,
+            (&raw const on).cast(),
+            size_of::<BOOL>() as u32,
+        );
+        if IsWindowVisible(hwnd).as_bool() {
+            let flags = SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER;
+            let _ = SetWindowPos(hwnd, None, 0, 0, 0, 0, flags);
+        }
+    }
+}
+
+unsafe extern "system" fn keep_dark(
+    hwnd: HWND,
+    msg: u32,
+    wparam: WPARAM,
+    lparam: LPARAM,
+) -> LRESULT {
+    // Set before this procedure was installed: never null here.
+    let previous: WNDPROC =
+        unsafe { std::mem::transmute(PREVIOUS_WNDPROC.load(Ordering::Relaxed)) };
+    let result = unsafe { CallWindowProcW(previous, hwnd, msg, wparam, lparam) };
+    if msg == WM_SETTINGCHANGE {
+        set_dark(hwnd);
+    }
+    result
 }
 
 pub fn install(ctx: &egui::Context) {
@@ -128,6 +175,8 @@ pub fn install(ctx: &egui::Context) {
     icon_list.extend(fonts.families[&FontFamily::Proportional].clone());
     fonts.families.insert(icons(), icon_list);
     ctx.set_fonts(fonts);
+    // Dark, not "follow the system": egui hands this choice on to the window's title bar.
+    ctx.set_theme(egui::ThemePreference::Dark);
 
     ctx.all_styles_mut(|style| {
         style.text_styles = [

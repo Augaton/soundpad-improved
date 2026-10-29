@@ -26,6 +26,11 @@ pub fn data_dir() -> PathBuf {
         .unwrap_or_else(|| app_data().join("soundpad-improved"))
 }
 
+/// Where sounds added from a link are saved.
+pub fn sounds_dir() -> PathBuf {
+    data_dir().join("sons")
+}
+
 fn library_file() -> PathBuf {
     data_dir().join("library.json")
 }

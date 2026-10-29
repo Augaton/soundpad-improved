@@ -15,6 +15,8 @@ Soundboard pour Windows, pensée comme un Soundpad amélioré.
   possible, avec ta voix mélangée par l'appli. Un vumètre montre ce que les autres entendent.
 - **Import de Soundpad en un clic** : sons, catégories et raccourcis. Le fichier de Soundpad est
   seulement lu, jamais modifié.
+- **Sons en ligne** : colle le lien d'un son Voicemod Tuna ou MyInstants, ou d'un fichier audio :
+  l'appli le télécharge et l'ajoute, sous son titre.
 - Recherche insensible aux accents, tri par titre ou par sons les plus joués, favoris, catégories,
   glisser-déposer de fichiers et de dossiers.
 
@@ -71,6 +73,7 @@ Cable) »**. Pour réduire ton bruit de fond, coche « Réduction de bruit sur m
 | Bouton « Garder » | Enregistre le volume et la vitesse de l'instance comme réglages du son |
 | Ctrl+F | Recherche |
 | Glisser des fichiers ou dossiers | Ajout ; dans une catégorie ouverte, ils y sont rangés |
+| Ctrl+V d'un lien, ou bouton lien | Ajoute le son d'une page Voicemod Tuna ou MyInstants, ou un fichier audio en ligne |
 
 Un raccourci global marche partout, mais sa touche n'arrive plus aux autres applis tant que
 Soundpad Improved est ouvert. Préfère le pavé numérique, Pause, F13 à F24, ou une combinaison avec
@@ -79,7 +82,8 @@ Ctrl ou Alt.
 ## Données
 
 La bibliothèque et les réglages sont dans `%APPDATA%\soundpad-improved\library.json`. Les fichiers
-audio restent où ils sont : retirer un son de la bibliothèque ne supprime jamais le fichier.
+audio restent où ils sont : retirer un son de la bibliothèque ne supprime jamais le fichier. Les
+sons ajoutés depuis un lien sont enregistrés dans `%APPDATA%\soundpad-improved\sons`.
 
 ## Formats
 
@@ -90,6 +94,7 @@ fichier affiche « Lecture impossible ».
 
 ```
 cargo test                            # logique, mélangeur, limiteur, anneau du filtre, décodage
+cargo test -- --ignored               # téléchargement réel depuis Voicemod Tuna et MyInstants
 native\build.cmd                      # filtre micro (g++ de MSYS2), avant cargo build pour l'embarquer
 native\bin\test_apo.exe native\bin    # filtre micro de bout en bout, sans droits administrateur
 cargo run
@@ -110,6 +115,9 @@ cargo run
 - `src/filter.rs` : état, installation et retrait du filtre, par `native/mic-filter.ps1` (embarqué avec
   la DLL). PowerShell est pris dans System32 ; il n'exécute le script que s'il a l'empreinte SHA-256
   de celui de l'exe, et la DLL est vérifiée une fois copiée dans Program Files.
+- `src/link.rs` : un son depuis un lien. Il est trouvé dans la page (données schema.org, puis
+  Open Graph), téléchargé en HTTPS seulement par WinHTTP (proxy et certificats de Windows), avec une
+  taille plafonnée, et gardé seulement s'il se décode.
 - `src/model.rs`, `src/keys.rs`, `src/soundpad.rs`, `src/store.rs` : la bibliothèque, les noms de
   touches, l'import Soundpad, les fichiers.
 - `native/apo.cpp` : le filtre, un APO d'effet de point de terminaison (EFX) chargé par `audiodg.exe`.
@@ -118,6 +126,6 @@ cargo run
 - `native/mic-filter.ps1` : état, installation et retrait du filtre (registre du micro, sauvegarde de
   l'effet d'origine dans `HKLM\SOFTWARE\Soundpad Improved\Backup`).
 
-Variables de test : `SPI_USER_DATA=<dossier>` isole le profil ; `SPI_MIC_SHM=Local\<nom>` remplace la
-mémoire partagée du filtre, pour la tester avec
-`native\bin\test_apo.exe native\bin --listen Local\<nom> <secondes>` à la place d'audiodg.
+Variables de test : `SPI_USER_DATA=<dossier>` isole le profil, et l'appli tourne alors à côté de
+celle de tous les jours ; `SPI_MIC_SHM=Local\<nom>` remplace la mémoire partagée du filtre, pour la
+tester avec `native\bin\test_apo.exe native\bin --listen Local\<nom> <secondes>` à la place d'audiodg.

@@ -6,7 +6,7 @@ description = "Soundboard polyphonique : plusieurs sons à la fois, volume régl
 publish = false
 
 [dependencies]
-eframe = { version = "0.37", default-features = false, features = ["accesskit", "default_fonts", "glow"] }
+eframe = { version = "0.37", default-features = false, features = ["accesskit", "clipboard", "default_fonts", "glow"] }
 cpal = "0.18"
 symphonia = { version = "0.6", features = ["all"] }
 rubato = "5"
@@ -18,6 +18,7 @@ serde_json = "1"
 windows = { version = "0.62", features = [
   "Win32_Foundation",
   "Win32_Graphics_Dwm",
+  "Win32_Networking_WinHttp",
   "Win32_Security",
   "Win32_Security_Cryptography",
   "Win32_System_Com",

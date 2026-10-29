@@ -23,7 +23,7 @@ use crate::model::{Cable, Category, Library, Sound, search_key};
 use crate::state::{Core, Snapshot, Toast, lock};
 use crate::store;
 use capture::Capture;
-use dialogs::{Confirm, Editor};
+use dialogs::{Confirm, Editor, LinkDialog};
 use theme::*;
 use widgets::*;
 
@@ -61,6 +61,7 @@ pub struct App {
     settings: bool,
     settings_error: Option<String>,
     confirm: Option<Confirm>,
+    link: Option<LinkDialog>,
     capture: Option<Capture>,
     toasts: Vec<Toast>,
     meter: f32,
@@ -89,6 +90,7 @@ impl App {
             settings: false,
             settings_error: None,
             confirm: None,
+            link: None,
             capture: None,
             toasts: Vec::new(),
             meter: 0.0,
@@ -210,6 +212,11 @@ impl App {
                         }
                         if icon_button(ui, I_SETTINGS, "Réglages", self.settings).clicked() {
                             self.open_settings();
+                        }
+                        let link_hint =
+                            "Ajouter depuis un lien (Voicemod Tuna, MyInstants…)   Ctrl+V";
+                        if icon_button(ui, I_LINK, link_hint, self.link.is_some()).clicked() {
+                            self.link = Some(LinkDialog::new(""));
                         }
                         if icon_text(ui, I_ADD, "Ajouter des sons").clicked() {
                             self.pick_and_add();
@@ -557,7 +564,7 @@ impl App {
                         if soundpad > 1 { "s" } else { "" }
                     )
                 } else {
-                    "Ajoute des sons, ou glisse ici des fichiers audio ou des dossiers.".to_string()
+                    "Ajoute des sons, glisse ici des fichiers audio ou des dossiers, ou colle (Ctrl+V) le lien d’un son Voicemod Tuna ou MyInstants.".to_string()
                 },
             )
         } else if !query.is_empty() {
@@ -583,13 +590,16 @@ impl App {
             if lib.sounds.is_empty() {
                 ui.add_space(14.0);
                 ui.horizontal(|ui| {
-                    let w = if soundpad > 0 { 330.0 } else { 150.0 };
+                    let w = if soundpad > 0 { 460.0 } else { 280.0 };
                     ui.add_space(((ui.available_width() - w) / 2.0).max(0.0));
                     if soundpad > 0 && primary(ui, "Importer depuis Soundpad").clicked() {
                         self.import_soundpad();
                     }
                     if ui.button("Ajouter des sons").clicked() {
                         self.pick_and_add();
+                    }
+                    if ui.button("Depuis un lien").clicked() {
+                        self.link = Some(LinkDialog::new(""));
                     }
                 });
             }
@@ -948,6 +958,28 @@ impl App {
         }
     }
 
+    /// Ctrl+V on the window (no text field focused) with a link: the link dialog, filled in.
+    fn handle_paste(&mut self, ctx: &Context) {
+        let busy = self.link.is_some()
+            || self.editor.is_some()
+            || self.settings
+            || self.confirm.is_some()
+            || self.capture.is_some();
+        if busy || ctx.memory(|m| m.focused().is_some()) {
+            return;
+        }
+        let pasted = ctx.input(|i| {
+            i.events.iter().find_map(|e| match e {
+                egui::Event::Paste(t) => Some(t.trim().to_string()),
+                _ => None,
+            })
+        });
+        if let Some(url) = pasted.filter(|t| t.len() > 8 && t[..8].eq_ignore_ascii_case("https://"))
+        {
+            self.link = Some(LinkDialog::new(&url));
+        }
+    }
+
     fn handle_drop(&mut self, ctx: &Context) {
         let dropped: Vec<PathBuf> = ctx.input(|i| {
             i.raw
@@ -982,6 +1014,7 @@ impl eframe::App for App {
             self.focus_search = true;
         }
         self.handle_drop(&ctx);
+        self.handle_paste(&ctx);
 
         let rev = self.core.revision();
         if rev != self.rev {
