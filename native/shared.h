@@ -1,8 +1,9 @@
-// Shared-memory ring between spi-feed.exe (writer: the app's sounds) and the microphone APO
+// Shared-memory ring between the app (writer: its sounds, src/audio/ring.rs) and the microphone APO
 // (reader, inside audiodg.exe). One writer, any number of readers, no locks: the writer stores
 // the samples, then publishes writePos; a reader never reads at or past writePos.
 #pragma once
 #include <windows.h>
+#include <math.h>
 #include <sddl.h>
 #include <stdint.h>
 
@@ -68,6 +69,25 @@ inline SpiRing* spiOpenRing(HANDLE* mapping, bool create) {
   }
   *mapping = h;
   return r;
+}
+
+// The writer's side, as src/audio/ring.rs does it: the samples, clamped (the APO trusts the
+// ring), then writePos. Used by the end-to-end test; keep the two in step.
+inline void spiWrite(SpiRing* r, const float* frames, uint32_t n) {
+  if (n > SPI_CAPACITY) {
+    frames += size_t(n - SPI_CAPACITY) * SPI_CHANNELS;
+    n = SPI_CAPACITY;
+  }
+  int64_t w = r->writePos; // single writer
+  for (uint32_t i = 0; i < n; i++) {
+    float* f = &r->data[((w + i) & (SPI_CAPACITY - 1)) * SPI_CHANNELS];
+    for (uint32_t c = 0; c < SPI_CHANNELS; c++) {
+      float x = frames[i * SPI_CHANNELS + c];
+      f[c] = isfinite(x) ? (x > 1.f ? 1.f : (x < -1.f ? -1.f : x)) : 0.f;
+    }
+  }
+  __atomic_store_n(&r->writePos, w + n, __ATOMIC_RELEASE);
+  __atomic_store_n(&r->writerTick, GetTickCount64(), __ATOMIC_RELAXED);
 }
 
 inline void spiCloseRing(SpiRing* r, HANDLE mapping) {

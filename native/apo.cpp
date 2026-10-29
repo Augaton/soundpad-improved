@@ -1,5 +1,5 @@
 // Microphone filter: an endpoint effect (EFX) APO that Windows' audio engine (audiodg.exe) runs
-// on the microphone. It adds the sounds spi-feed.exe writes in the shared ring (shared.h) to the
+// on the microphone. It adds the sounds the app writes in the shared ring (shared.h) to the
 // microphone signal, so every app that records this microphone hears them, the way Soundpad does.
 //
 // APOProcess runs on the real-time audio thread: it never blocks, allocates or waits. Without a

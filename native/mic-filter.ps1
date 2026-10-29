@@ -1,5 +1,6 @@
-# Installs, removes or reports the microphone filter (bin\SoundpadImprovedApo.dll): an endpoint
-# effect (EFX) that Windows' audio engine runs on each microphone, as Soundpad's UniteFx does.
+# Installs, removes or reports the microphone filter (-Source, else bin\SoundpadImprovedApo.dll
+# next to this script): an endpoint effect (EFX) that Windows' audio engine runs on each
+# microphone, as Soundpad's UniteFx does.
 #   -Action status     any user. Which microphones have the filter.
 #   -Action install    administrator. Copies the DLL to Program Files, registers it, and puts it
 #                      on every active microphone whose effect slot is free or holds Soundpad's.
@@ -8,7 +9,9 @@
 # The result is one line of JSON, on stdout or in the -Out file (an elevated run has no stdout).
 param(
   [Parameter(Mandatory = $true)][ValidateSet('status', 'install', 'uninstall')][string]$Action,
-  [string]$Out
+  [string]$Out,
+  [string]$Source,     # the DLL to install
+  [string]$SourceHash  # its SHA-256, checked once copied where only administrators can write
 )
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.Encoding]::UTF8
@@ -25,7 +28,8 @@ $Capture = 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\MMDevices\Audio\Capt
 $Backup = 'HKLM:\SOFTWARE\Soundpad Improved\Backup'
 $ComKey = "HKLM:\SOFTWARE\Classes\CLSID\$Clsid"
 $ApoKey = "HKLM:\SOFTWARE\Classes\AudioEngine\AudioProcessingObjects\$Clsid"
-$InstallDir = Join-Path $env:ProgramFiles 'Soundpad Improved'
+# The known folder, not $env:ProgramFiles: a user variable could point that somewhere writable.
+$InstallDir = Join-Path ([Environment]::GetFolderPath('ProgramFiles')) 'Soundpad Improved'
 $Dll = Join-Path $InstallDir 'SoundpadImprovedApo.dll'
 
 function Get-Microphones {
@@ -84,14 +88,22 @@ function Get-Status {
 
 function Install-Filter {
   Assert-Admin
-  $src = Join-Path $PSScriptRoot 'bin\SoundpadImprovedApo.dll'
-  if (-not (Test-Path $src)) { throw 'not-built' }
+  $src = if ($Source) { $Source } elseif ($PSScriptRoot) { Join-Path $PSScriptRoot 'bin\SoundpadImprovedApo.dll' } else { '' }
+  if (-not $src -or -not (Test-Path $src)) { throw 'not-built' }
   $targets = @(Get-Microphones | Where-Object { Test-Eligible $_ })
   if (-not $targets) { throw 'no-mic' }
+  # The source folder is the user's: the copy is checked where only administrators can write,
+  # before the audio engine (a service) ever loads it.
+  New-Item -ItemType Directory -Force $InstallDir | Out-Null
+  $new = "$Dll.new"
+  Copy-Item $src $new -Force
+  if ($SourceHash -and (Get-FileHash $new -Algorithm SHA256).Hash -ne $SourceHash) {
+    Remove-Item $new -Force
+    throw 'bad-dll'
+  }
   Stop-Service Audiosrv -Force # unloads an older copy of the DLL
   try {
-    New-Item -ItemType Directory -Force $InstallDir | Out-Null
-    Copy-Item $src $Dll -Force
+    Move-Item $new $Dll -Force
 
     New-Item -Force "$ComKey\InprocServer32" | Out-Null
     Set-Item $ComKey 'Soundpad Improved microphone filter'

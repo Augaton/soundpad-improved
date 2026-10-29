@@ -1,7 +1,7 @@
 // End-to-end test of the microphone filter, as a normal user: loads the APO DLL the way the
-// audio engine does, runs the real spi-feed.exe on a private ring (SPI_MIC_SHM), feeds it a
-// 1 kHz sine in real time and checks what comes out of the "microphone".
-//   test_apo.exe <dir with SoundpadImprovedApo.dll and spi-feed.exe>
+// audio engine does, writes a 1 kHz sine in real time into a private ring (SPI_MIC_SHM), the
+// way the app does, and checks what comes out of the "microphone".
+//   test_apo.exe <dir with SoundpadImprovedApo.dll>
 // Listen mode stands in for audiodg.exe while the real app feeds the ring: it creates the ring
 // <name> (start it first, with the app's SPI_MIC_SHM), runs a 48 kHz mono "microphone" for
 // <seconds> and prints the level of the sounds it received, per half second.
@@ -56,48 +56,30 @@ class MediaType final : public IAudioMediaType {
   UNCOMPRESSEDAUDIOFORMAT f_;
 };
 
+// The app's side of the ring, in-process: opens it once the filter has created it, writes,
+// and notes the microphone rates the filter reports.
 struct Feeder {
-  HANDLE process = nullptr, in = nullptr, out = nullptr;
-  std::string output;
-  bool start(const std::string& exe) {
-    SECURITY_ATTRIBUTES sa = {sizeof sa, nullptr, TRUE};
-    HANDLE inRead, outWrite;
-    if (!CreatePipe(&inRead, &in, &sa, 1 << 20) || !CreatePipe(&out, &outWrite, &sa, 0)) return false;
-    SetHandleInformation(in, HANDLE_FLAG_INHERIT, 0);
-    SetHandleInformation(out, HANDLE_FLAG_INHERIT, 0);
-    STARTUPINFOA si = {};
-    si.cb = sizeof si;
-    si.dwFlags = STARTF_USESTDHANDLES;
-    si.hStdInput = inRead;
-    si.hStdOutput = outWrite;
-    si.hStdError = GetStdHandle(STD_ERROR_HANDLE);
-    PROCESS_INFORMATION pi;
-    std::string cmd = "\"" + exe + "\"";
-    if (!CreateProcessA(nullptr, &cmd[0], nullptr, nullptr, TRUE, CREATE_NO_WINDOW, nullptr, nullptr, &si, &pi))
-      return false;
-    CloseHandle(inRead);
-    CloseHandle(outWrite);
-    CloseHandle(pi.hThread);
-    process = pi.hProcess;
-    return true;
-  }
+  HANDLE mapping = nullptr;
+  SpiRing* ring = nullptr;
+  uint32_t lastRate = 0;
+  std::string output; // "LIVE <rate>" each time the reported rate changes
   void write(const std::vector<float>& frames) {
-    DWORD n;
-    WriteFile(in, frames.data(), DWORD(frames.size() * sizeof(float)), &n, nullptr);
+    if (!ring) ring = spiOpenRing(&mapping, false);
+    if (ring && spiReady(ring)) spiWrite(ring, frames.data(), uint32_t(frames.size() / SPI_CHANNELS));
   }
   void poll() {
-    DWORD avail = 0;
-    while (PeekNamedPipe(out, nullptr, 0, nullptr, &avail, nullptr) && avail) {
-      char buf[256];
-      DWORD n = 0;
-      ReadFile(out, buf, avail < sizeof buf ? avail : sizeof buf, &n, nullptr);
-      output.append(buf, n);
+    if (!ring || !spiReady(ring)) return;
+    if (GetTickCount64() - __atomic_load_n(&ring->readerTick, __ATOMIC_RELAXED) > 1000) return;
+    uint32_t rate = __atomic_load_n(&ring->readerRate, __ATOMIC_RELAXED);
+    if (rate != lastRate) {
+      lastRate = rate;
+      output += "LIVE " + std::to_string(rate) + "\n";
     }
   }
   void stop() {
-    CloseHandle(in);
-    WaitForSingleObject(process, 5000);
-    poll();
+    spiCloseRing(ring, mapping);
+    ring = nullptr;
+    mapping = nullptr;
   }
 };
 
@@ -211,7 +193,7 @@ int main(int argc, char** argv) {
   bool listen = argc > 4 && strcmp(argv[2], "--listen") == 0;
   char name[64];
   snprintf(name, sizeof name, "Local\\SpiMicTest%lu", GetCurrentProcessId());
-  SetEnvironmentVariableA("SPI_MIC_SHM", listen ? argv[3] : name); // read by the DLL, inherited by the feeder
+  SetEnvironmentVariableA("SPI_MIC_SHM", listen ? argv[3] : name); // read by the DLL and the feeder
   CoInitializeEx(nullptr, COINIT_MULTITHREADED);
   timeBeginPeriod(1); // Sleep(1) may last 15 ms otherwise (CI machines), too coarse for real time
 
@@ -270,7 +252,6 @@ int main(int argc, char** argv) {
   }
 
   Feeder feeder;
-  CHECK(feeder.start(dir + "\\spi-feed.exe"), "spi-feed.exe ne démarre pas (%lu)", GetLastError());
   double rms, freq;
   int jumps;
 
@@ -318,9 +299,9 @@ int main(int argc, char** argv) {
   CHECK(r.passthroughErrors == 0, "micro modifié après l'arrêt : %d échantillons", r.passthroughErrors);
 
   feeder.stop();
-  printf("spi-feed :\n%s", feeder.output.c_str());
-  CHECK(feeder.output.find("STATE LIVE 48000") != std::string::npos, "état LIVE 48000 non signalé");
-  CHECK(feeder.output.find("STATE LIVE 44100") != std::string::npos, "état LIVE 44100 non signalé");
+  printf("micro vu par l'appli :\n%s", feeder.output.c_str());
+  CHECK(feeder.output.find("LIVE 48000") != std::string::npos, "micro à 48000 Hz non signalé");
+  CHECK(feeder.output.find("LIVE 44100") != std::string::npos, "micro à 44100 Hz non signalé");
 
   CHECK(canUnload() == S_OK, "DllCanUnloadNow : objets encore vivants");
   printf(failures ? "\n%d ECHEC(S)\n" : "\nOK\n", failures);

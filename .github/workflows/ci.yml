@@ -5,19 +5,12 @@ on:
   pull_request:
 
 jobs:
-  test:
+  build:
     runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-
-      # Pure logic only: no dependency to install (Electron is not needed).
-      - name: Tests JS
-        run: npm test
-
+      # The microphone filter first: the app embeds the DLL when it is built.
       - uses: msys2/setup-msys2@v2
         id: msys2
         with:
@@ -28,22 +21,28 @@ jobs:
         run: Add-Content $env:GITHUB_PATH "${{ steps.msys2.outputs.msys2-location }}\ucrt64\bin"
 
       - name: Compilation du filtre micro
-        run: npm run build:native
+        run: native\build.cmd
 
       - name: Test du filtre micro de bout en bout
-        run: npm run test:native
+        run: native\bin\test_apo.exe native\bin
+
+      - uses: Swatinem/rust-cache@v2
+
+      - name: Tests Rust
+        run: cargo test
+
+      - name: Exe
+        run: cargo build --release
 
       - uses: actions/upload-artifact@v4
         with:
-          name: filtre-micro
-          path: |
-            native/bin/SoundpadImprovedApo.dll
-            native/bin/spi-feed.exe
+          name: exe
+          path: target/release/soundpad-improved.exe
 
-  # Every green push on main publishes the portable exe as a GitHub Release, numbered
-  # <major>.<minor> of package.json, then the CI run number: 0.1.12, 0.1.13...
+  # Every green push on main publishes the exe as a GitHub Release, numbered <major>.<minor>
+  # of Cargo.toml, then the CI run number: 0.2.12, 0.2.13...
   release:
-    needs: test
+    needs: build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
     runs-on: windows-latest
     permissions:
@@ -51,35 +50,15 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
-        with:
-          node-version: 22
-          cache: npm
-
-      # electron-builder fetches the Electron it packages by itself.
-      - name: Dépendances
-        run: npm ci
-        env:
-          ELECTRON_SKIP_BINARY_DOWNLOAD: '1'
-
-      # The filter built and tested by the test job.
       - uses: actions/download-artifact@v4
         with:
-          name: filtre-micro
-          path: native/bin
-
-      - name: Numéro de version
-        id: version
-        run: |
-          $base = node -p "require('./package.json').version.split('.').slice(0, 2).join('.')"
-          "version=$base.${{ github.run_number }}" >> $env:GITHUB_OUTPUT
-
-      - name: Exe portable
-        run: npx electron-builder --win portable --publish never "-c.extraMetadata.version=${{ steps.version.outputs.version }}"
+          name: exe
 
       - name: Release GitHub
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $v = "${{ steps.version.outputs.version }}"
-          gh release create "v$v" "dist/Soundpad-Improved-$v.exe" --target "${{ github.sha }}" --title "Soundpad Improved $v" --generate-notes
+          $base = (Select-String -Path Cargo.toml -Pattern '^version = "(\d+\.\d+)').Matches[0].Groups[1].Value
+          $v = "$base.${{ github.run_number }}"
+          Move-Item soundpad-improved.exe "Soundpad-Improved-$v.exe"
+          gh release create "v$v" "Soundpad-Improved-$v.exe" --target "${{ github.sha }}" --title "Soundpad Improved $v" --generate-notes

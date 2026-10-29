@@ -30,17 +30,17 @@ le câble comme un micro.
 ## Installation
 
 Le plus simple : télécharge `Soundpad-Improved-<version>.exe` dans les Releases du dépôt. La CI en
-publie une à chaque push sur `main` dont les tests passent. C'est un exe portable, sans installation :
-il démarre en quelques secondes, le temps de se décompresser. Il n'est pas signé, donc Windows
-SmartScreen peut afficher « Windows a protégé votre ordinateur » : « Informations complémentaires »,
-puis « Exécuter quand même ». Il garde la même bibliothèque que `npm start`.
+publie une à chaque push sur `main` dont les tests passent. C'est un seul exe, sans installation, qui
+démarre aussitôt ; le filtre micro est dedans. Il n'est pas signé, donc Windows SmartScreen peut
+afficher « Windows a protégé votre ordinateur » : « Informations complémentaires », puis « Exécuter
+quand même ». Il reprend la bibliothèque de la version Electron telle quelle.
 
 Depuis les sources :
 
-1. Dans ce dossier, lance `npm install`.
-2. Compile le filtre micro : `npm run build:native`. Il faut le g++ de MSYS2 (UCRT64) dans le PATH.
-3. Lance l'appli : double-clic sur `Lancer.cmd` (ou `npm start`). `npm run dist` fabrique l'exe
-   portable dans `dist/`.
+1. Installe Rust (https://rustup.rs) et le g++ de MSYS2 (UCRT64), dans le PATH.
+2. Compile le filtre micro : `native\build.cmd`. L'appli l'embarque si `native\bin` existe au moment
+   de la compiler.
+3. `cargo run --release`, ou `cargo build --release` : l'exe est dans `target\release`.
 
 Puis, dans l'appli :
 
@@ -81,32 +81,43 @@ Ctrl ou Alt.
 La bibliothèque et les réglages sont dans `%APPDATA%\soundpad-improved\library.json`. Les fichiers
 audio restent où ils sont : retirer un son de la bibliothèque ne supprime jamais le fichier.
 
+## Formats
+
+mp3, wav, ogg et webm (Vorbis), flac, m4a et aac, aiff. L'Opus n'est pas pris en charge : un tel
+fichier affiche « Lecture impossible ».
+
 ## Développement
 
 ```
-npm test              # logique pure : import Soundpad, raccourcis, normalisation, modes de lecture
-npm run build:native  # filtre micro (g++ de MSYS2)
-npm run test:native   # filtre micro de bout en bout, sans droits administrateur
-npm start
+cargo test                            # logique, mélangeur, limiteur, anneau du filtre, décodage
+native\build.cmd                      # filtre micro (g++ de MSYS2), avant cargo build pour l'embarquer
+native\bin\test_apo.exe native\bin    # filtre micro de bout en bout, sans droits administrateur
+cargo run
 ```
 
-- `main.js` : fenêtre, fichiers, dialogues, pilotage de `hotkeys.ps1`, de `spi-feed.exe` et de
-  `mic-filter.ps1`.
-- `hotkeys.ps1` : raccourcis globaux via l'API Windows `RegisterHotKey`. Electron ne sait pas
-  enregistrer certaines touches, dont Pause.
-- `src/engine.mjs` : moteur audio (Web Audio), deux sorties, voix indépendantes, micro, limiteur.
-  En mode filtre, `src/pcm-tap.js` (AudioWorklet) récupère la sortie « autres » par blocs de 10 ms.
-- `src/lib.mjs` : logique pure, testée par `test/lib.test.mjs`.
-- `src/app.mjs`, `src/index.html`, `src/style.css` : interface.
+- `src/main.rs` : démarrage, une seule instance à la fois.
+- `src/state.rs` : l'état de l'appli et ses actions (lecture, sauvegarde, raccourcis, filtre),
+  partagés entre la fenêtre et le fil des raccourcis : un raccourci joue même fenêtre réduite.
+- `src/ui/` : l'interface (egui). `mod.rs` la fenêtre, `dialogs.rs` l'éditeur de son et les
+  réglages, `widgets.rs` les pads et curseurs, `theme.rs` couleurs et polices (celles de Windows),
+  `capture.rs` la saisie d'un raccourci, qui lit l'état des touches de Windows.
+- `src/audio/decode.rs` : fichier vers PCM stéréo 48 kHz (symphonia, rubato), gain d'égalisation.
+- `src/audio/mixer.rs` : les voix, rendues par chaque sortie avec son propre curseur.
+- `src/audio/engine.rs` : cache de décodage, sorties (cpal), ta voix et sa réduction de bruit
+  (RNNoise), limiteur, et l'envoi au filtre micro au rythme de 48 kHz.
+- `src/audio/ring.rs` : l'écriture dans la mémoire partagée du filtre (`native/shared.h`).
+- `src/hotkeys.rs` : raccourcis globaux via l'API Windows `RegisterHotKey`, toutes touches comprises.
+- `src/filter.rs` : état, installation et retrait du filtre, par `native/mic-filter.ps1` (embarqué avec
+  la DLL). PowerShell est pris dans System32 ; il n'exécute le script que s'il a l'empreinte SHA-256
+  de celui de l'exe, et la DLL est vérifiée une fois copiée dans Program Files.
+- `src/model.rs`, `src/keys.rs`, `src/soundpad.rs`, `src/store.rs` : la bibliothèque, les noms de
+  touches, l'import Soundpad, les fichiers.
 - `native/apo.cpp` : le filtre, un APO d'effet de point de terminaison (EFX) chargé par `audiodg.exe`.
   Il ajoute au micro le son lu dans une mémoire partagée (`native/shared.h`), avec un
   rééchantillonnage qui suit la dérive entre l'horloge de l'appli et celle du micro.
-- `native/feed.cpp` : `spi-feed.exe`, reçoit le son de l'appli sur stdin et l'écrit dans la mémoire
-  partagée.
 - `native/mic-filter.ps1` : état, installation et retrait du filtre (registre du micro, sauvegarde de
   l'effet d'origine dans `HKLM\SOFTWARE\Soundpad Improved\Backup`).
 
-Variables de test : `SPI_USER_DATA=<dossier>` isole le profil ; `SPI_SCREENSHOT=<fichier.png>`
-enregistre une capture de la fenêtre puis quitte (`SPI_SCREENSHOT_JS` exécute du code avant) ;
-`SPI_MIC_SHM=Local\<nom>` remplace la mémoire partagée du filtre, pour la tester avec
+Variables de test : `SPI_USER_DATA=<dossier>` isole le profil ; `SPI_MIC_SHM=Local\<nom>` remplace la
+mémoire partagée du filtre, pour la tester avec
 `native\bin\test_apo.exe native\bin --listen Local\<nom> <secondes>` à la place d'audiodg.
