@@ -73,6 +73,7 @@ pub struct Category {
     pub id: String,
     pub name: String,
     pub sound_ids: Vec<String>,
+    pub hotkey: Option<String>, // plays one of its sounds at random
 }
 
 #[derive(Clone, Debug, PartialEq, Default, Serialize)]
@@ -187,6 +188,8 @@ pub struct Settings {
     pub exclusive: bool,
     pub max_voices: u32,
     pub hotkeys: GlobalHotkeys,
+    pub close_to_tray: bool,
+    pub tray_tip_shown: bool, // the notice "still running here" was shown once
 }
 
 fn is_unset(c: &Cable) -> bool {
@@ -209,6 +212,8 @@ impl Default for Settings {
             exclusive: false,
             max_voices: 16,
             hotkeys: GlobalHotkeys::default(),
+            close_to_tray: true,
+            tray_tip_shown: false,
         }
     }
 }
@@ -260,6 +265,9 @@ impl Library {
         for s in &self.sounds {
             add(&s.hotkey, Action::Play(s.id.clone()));
         }
+        for c in &self.categories {
+            add(&c.hotkey, Action::Random(c.id.clone()));
+        }
         for a in GlobalAction::ALL {
             add(self.settings.hotkeys.get(a), Action::Global(a));
         }
@@ -276,6 +284,13 @@ impl Library {
         {
             return Some(format!("« {} »", s.title));
         }
+        if let Some(c) = self
+            .categories
+            .iter()
+            .find(|c| !matches!(except, Action::Random(id) if *id == c.id) && taken(&c.hotkey))
+        {
+            return Some(format!("la catégorie « {} »", c.name));
+        }
         GlobalAction::ALL
             .into_iter()
             .find(|&a| *except != Action::Global(a) && taken(self.settings.hotkeys.get(a)))
@@ -285,7 +300,8 @@ impl Library {
 
 #[derive(Clone, Debug, PartialEq, Eq, Hash)]
 pub enum Action {
-    Play(String), // sound id
+    Play(String),   // sound id
+    Random(String), // category id: one of its sounds
     Global(GlobalAction),
 }
 
@@ -375,6 +391,7 @@ pub fn normalize_library(raw: &Value) -> Library {
                 id: c.get("id")?.as_str()?.to_string(),
                 name: c.get("name")?.as_str()?.to_string(),
                 sound_ids,
+                hotkey: string(c.get("hotkey")),
             })
         })
         .collect();
@@ -419,6 +436,8 @@ pub fn normalize_library(raw: &Value) -> Library {
             vol_up: string(hk.get("volUp")),
             vol_down: string(hk.get("volDown")),
         },
+        close_to_tray: boolean(s.get("closeToTray")).unwrap_or(d.close_to_tray),
+        tray_tip_shown: boolean(s.get("trayTipShown")) == Some(true),
     };
     Library {
         version: 1,
@@ -588,6 +607,72 @@ pub fn plan_play(mode: Mode, same_sound: &[u64], all: &[u64], exclusive: bool) -
     (Vec::new(), true)
 }
 
+/// A category's hotkey: one of its sounds at random (`seed` is any random number), never the
+/// one played last time while there is another.
+pub fn pick_random<'a>(ids: &[&'a str], last: Option<&str>, seed: u64) -> Option<&'a str> {
+    let pool: Vec<&str> = ids
+        .iter()
+        .copied()
+        .filter(|id| ids.len() < 2 || Some(*id) != last)
+        .collect();
+    if pool.is_empty() {
+        return None;
+    }
+    Some(pool[(seed % pool.len() as u64) as usize])
+}
+
+// ---------- Library edits ----------
+
+/// Moves the item at `from` next to the one at `target`: just before it, or just after it.
+pub fn reorder<T>(list: &mut Vec<T>, from: usize, target: usize, after: bool) {
+    if from == target || from >= list.len() || target >= list.len() {
+        return;
+    }
+    let item = list.remove(from);
+    let target = if from < target { target - 1 } else { target };
+    list.insert(if after { target + 1 } else { target }, item);
+}
+
+fn path_parts(p: &str) -> Vec<String> {
+    p.split(['\\', '/'])
+        .filter(|s| !s.is_empty())
+        .map(str::to_lowercase)
+        .collect()
+}
+
+/// Missing sounds found again among `files`, as (sound id, new path). A file is recognized by
+/// its name; between files of the same name, the one whose folders end like the old path's
+/// wins. A file is given to one sound only.
+pub fn relink(missing: &[(String, String)], files: &[String]) -> Vec<(String, String)> {
+    let parts: Vec<Vec<String>> = files.iter().map(|f| path_parts(f)).collect();
+    let mut taken = vec![false; files.len()];
+    let mut found = Vec::new();
+    for (id, old) in missing {
+        let old = path_parts(old);
+        let Some(name) = old.last() else { continue };
+        let mut best: Option<(usize, usize)> = None; // (file, path parts in common)
+        for (i, f) in parts.iter().enumerate() {
+            if taken[i] || f.last() != Some(name) {
+                continue;
+            }
+            let common = f
+                .iter()
+                .rev()
+                .zip(old.iter().rev())
+                .take_while(|(a, b)| a == b)
+                .count();
+            if best.is_none_or(|(_, c)| common > c) {
+                best = Some((i, common));
+            }
+        }
+        if let Some((i, _)) = best {
+            taken[i] = true;
+            found.push((id.clone(), files[i].clone()));
+        }
+    }
+    found
+}
+
 // ---------- Devices ----------
 
 /// Saved device -> current device name. "" is the Windows default. Names are compared to
@@ -692,6 +777,24 @@ pub fn filter_message(status: Option<&FilterStatus>, live: FilterLive) -> String
     }
 }
 
+// ---------- Updates ----------
+
+fn version_numbers(v: &str) -> Option<Vec<u64>> {
+    v.trim_start_matches('v')
+        .split('.')
+        .map(|n| n.parse().ok())
+        .collect()
+}
+
+/// Whether the release `latest` ("v0.2.14") is newer than the running `current` ("0.2.13").
+/// Anything but dotted numbers is never newer.
+pub fn is_newer(latest: &str, current: &str) -> bool {
+    match (version_numbers(latest), version_numbers(current)) {
+        (Some(l), Some(c)) => l > c,
+        _ => false,
+    }
+}
+
 // ---------- Ids ----------
 
 pub fn new_id() -> String {
@@ -708,6 +811,7 @@ pub fn new_id() -> String {
 mod tests {
     use super::*;
     use serde_json::json;
+    use std::collections::HashSet;
 
     #[test]
     fn clean_title_strips_the_voicemod_suffix_and_slug_dashes() {
@@ -778,6 +882,93 @@ mod tests {
                 .as_deref(),
             Some("« Tout arrêter »")
         );
+    }
+
+    #[test]
+    fn a_category_hotkey_plays_one_of_its_sounds_at_random() {
+        let lib = normalize_library(&json!({
+            "sounds": [{ "id": "a", "path": "C:\\a.mp3" }],
+            "categories": [{ "id": "c", "name": "Memes", "soundIds": ["a"], "hotkey": "F13" }],
+        }));
+        assert_eq!(lib.hotkeys()[0].action, Action::Random("c".into()));
+        assert_eq!(
+            lib.hotkey_owner("F13", &Action::Play("a".into()))
+                .as_deref(),
+            Some("la catégorie « Memes »")
+        );
+        assert_eq!(lib.hotkey_owner("F13", &Action::Random("c".into())), None);
+
+        assert_eq!(pick_random(&[], None, 7), None);
+        assert_eq!(pick_random(&["a"], Some("a"), 7), Some("a"));
+        for seed in 0..20 {
+            assert_ne!(pick_random(&["a", "b", "c"], Some("b"), seed), Some("b"));
+        }
+        let picked: HashSet<&str> = (0..20)
+            .filter_map(|seed| pick_random(&["a", "b", "c"], None, seed))
+            .collect();
+        assert_eq!(picked.len(), 3);
+    }
+
+    #[test]
+    fn reorder_moves_an_item_before_or_after_another() {
+        let moved = |from, target, after| {
+            let mut v = vec!['a', 'b', 'c', 'd'];
+            reorder(&mut v, from, target, after);
+            v.into_iter().collect::<String>()
+        };
+        assert_eq!(moved(0, 2, false), "bacd");
+        assert_eq!(moved(0, 2, true), "bcad");
+        assert_eq!(moved(3, 1, false), "adbc");
+        assert_eq!(moved(3, 0, true), "adbc");
+        assert_eq!(moved(1, 1, true), "abcd");
+        assert_eq!(moved(9, 1, true), "abcd");
+    }
+
+    #[test]
+    fn relink_finds_files_by_name_preferring_the_same_folders() {
+        let missing = |pairs: &[(&str, &str)]| -> Vec<(String, String)> {
+            pairs
+                .iter()
+                .map(|(a, b)| (a.to_string(), b.to_string()))
+                .collect()
+        };
+        let files: Vec<String> = [
+            r"D:\Sons\memes\boom.mp3",
+            r"D:\Sons\films\boom.mp3",
+            r"D:\Sons\Wow.MP3",
+        ]
+        .iter()
+        .map(|s| s.to_string())
+        .collect();
+        assert_eq!(
+            relink(
+                &missing(&[
+                    ("1", r"C:\Users\x\films\boom.mp3"),
+                    ("2", r"C:\old\wow.mp3"),
+                    ("3", r"C:\old\gone.mp3"),
+                ]),
+                &files
+            ),
+            missing(&[("1", r"D:\Sons\films\boom.mp3"), ("2", r"D:\Sons\Wow.MP3")])
+        );
+        // One file, two sounds of that name: the first one gets it.
+        assert_eq!(
+            relink(
+                &missing(&[("1", r"C:\a\wow.mp3"), ("2", r"C:\b\wow.mp3")]),
+                &files
+            ),
+            missing(&[("1", r"D:\Sons\Wow.MP3")])
+        );
+    }
+
+    #[test]
+    fn is_newer_compares_dotted_numbers() {
+        assert!(is_newer("v0.2.14", "0.2.13"));
+        assert!(is_newer("0.10.0", "0.9.99"));
+        assert!(!is_newer("v0.2.13", "0.2.13"));
+        assert!(!is_newer("v0.2.9", "0.2.13"));
+        assert!(!is_newer("v0.3.0-beta", "0.2.13"));
+        assert!(!is_newer("", "0.2.13"));
     }
 
     fn sine(amp: f32, seconds: usize) -> Vec<f32> {
@@ -943,7 +1134,8 @@ mod tests {
             vec![Category {
                 id: "c".into(),
                 name: "Mes sons".into(),
-                sound_ids: vec!["a".into()]
+                sound_ids: vec!["a".into()],
+                hotkey: None,
             }]
         );
         assert_eq!(lib.settings.cable_device, Cable::Off);
@@ -963,6 +1155,13 @@ mod tests {
         lib.sounds.push(Sound::new("C:\\x\\ba dum tss.mp3"));
         lib.settings.cable_device = Cable::Filter;
         lib.settings.hotkeys.vol_up = Some("Ctrl+Up".into());
+        lib.settings.close_to_tray = false;
+        lib.categories.push(Category {
+            id: "c".into(),
+            name: "Memes".into(),
+            sound_ids: vec![lib.sounds[0].id.clone()],
+            hotkey: Some("F13".into()),
+        });
         let text = serde_json::to_string(&lib).unwrap();
         assert_eq!(
             normalize_library(&serde_json::from_str(&text).unwrap()),

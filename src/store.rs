@@ -7,8 +7,8 @@ use serde_json::Value;
 
 use crate::model::{Library, normalize_library};
 
-pub const AUDIO_EXT: [&str; 9] = [
-    "mp3", "wav", "ogg", "oga", "m4a", "aac", "flac", "webm", "aiff",
+pub const AUDIO_EXT: [&str; 10] = [
+    "mp3", "wav", "ogg", "oga", "opus", "m4a", "aac", "flac", "webm", "aiff",
 ];
 const MAX_SCAN_FILES: usize = 5000;
 
@@ -46,7 +46,8 @@ pub struct Loaded {
 }
 
 /// The library. A file that is not JSON is kept aside; one that cannot be read at all (locked,
-/// no access) stays where it is and nothing is saved over it.
+/// no access) stays where it is and nothing is saved over it. A good one is copied to
+/// library.json.bak: the library as it was at launch, should something be removed by mistake.
 pub fn load_library() -> Loaded {
     let file = library_file();
     let text = match fs::read_to_string(&file) {
@@ -70,11 +71,14 @@ pub fn load_library() -> Loaded {
         }
     };
     match serde_json::from_str::<Value>(text.trim_start_matches('\u{feff}')) {
-        Ok(v) => Loaded {
-            lib: normalize_library(&v),
-            warning: None,
-            writable: true,
-        },
+        Ok(v) => {
+            let _ = fs::write(file.with_extension("json.bak"), &text);
+            Loaded {
+                lib: normalize_library(&v),
+                warning: None,
+                writable: true,
+            }
+        }
         Err(_) => {
             let stamp = std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

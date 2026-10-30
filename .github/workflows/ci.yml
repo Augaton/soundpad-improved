@@ -7,8 +7,18 @@ on:
 jobs:
   build:
     runs-on: windows-latest
+    outputs:
+      version: ${{ steps.version.outputs.version }}
     steps:
       - uses: actions/checkout@v4
+
+      # <major>.<minor> of Cargo.toml, then the CI run number: 0.2.12, 0.2.13...
+      # The exe knows it, to tell when a newer release is out.
+      - name: Version
+        id: version
+        run: |
+          $base = (Select-String -Path Cargo.toml -Pattern '^version = "(\d+\.\d+)').Matches[0].Groups[1].Value
+          "version=$base.${{ github.run_number }}" >> $env:GITHUB_OUTPUT
 
       # The microphone filter first: the app embeds the DLL when it is built.
       - uses: msys2/setup-msys2@v2
@@ -28,10 +38,18 @@ jobs:
 
       - uses: Swatinem/rust-cache@v2
 
+      - name: Mise en forme
+        run: cargo fmt --check
+
+      - name: Clippy
+        run: cargo clippy --all-targets -- -D warnings
+
       - name: Tests Rust
         run: cargo test
 
       - name: Exe
+        env:
+          SPI_VERSION: ${{ steps.version.outputs.version }}
         run: cargo build --release
 
       - uses: actions/upload-artifact@v4
@@ -39,8 +57,7 @@ jobs:
           name: exe
           path: target/release/soundpad-improved.exe
 
-  # Every green push on main publishes the exe as a GitHub Release, numbered <major>.<minor>
-  # of Cargo.toml, then the CI run number: 0.2.12, 0.2.13...
+  # Every green push on main publishes the exe as a GitHub Release, under the build's version.
   release:
     needs: build
     if: github.event_name == 'push' && github.ref == 'refs/heads/main'
@@ -58,7 +75,6 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
-          $base = (Select-String -Path Cargo.toml -Pattern '^version = "(\d+\.\d+)').Matches[0].Groups[1].Value
-          $v = "$base.${{ github.run_number }}"
+          $v = "${{ needs.build.outputs.version }}"
           Move-Item soundpad-improved.exe "Soundpad-Improved-$v.exe"
           gh release create "v$v" "Soundpad-Improved-$v.exe" --target "${{ github.sha }}" --title "Soundpad Improved $v" --generate-notes

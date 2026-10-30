@@ -1,6 +1,7 @@
 // The app's state and actions, shared by the window and the hotkey thread: a hotkey must play
 // even while the window is minimized and draws nothing.
-use std::collections::HashSet;
+use std::collections::{HashMap, HashSet};
+use std::hash::{BuildHasher, RandomState};
 use std::path::Path;
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::sync::mpsc::{self, Receiver, RecvTimeoutError, SendError, Sender};
@@ -16,13 +17,18 @@ use crate::keys;
 use crate::link;
 use crate::model::{
     Action, Cable, Device, FilterStatus, GlobalAction, Library, Mode, Sound, effective_mode,
-    is_virtual_cable, plan_play,
+    is_newer, is_virtual_cable, pick_random, plan_play, relink,
 };
 use crate::soundpad;
 use crate::store;
 
 pub const VOLUME_STEP: f32 = 0.1;
 const SAVE_DELAY: Duration = Duration::from_millis(400);
+pub const RELEASES: &str = "https://github.com/Augaton/soundpad-improved/releases/latest";
+const LATEST_RELEASE_API: &str =
+    "https://api.github.com/repos/Augaton/soundpad-improved/releases/latest";
+/// The version CI gives the exe ("0.2.13"); None for a build from the sources.
+pub const VERSION: Option<&str> = option_env!("SPI_VERSION");
 
 pub struct Toast {
     pub text: String,
@@ -52,6 +58,8 @@ pub struct Core {
     pub engine: Arc<Engine>,
     pub filter: Mutex<FilterState>,
     pub soundpad_count: Mutex<usize>, // sounds in Soundpad's list, shown while the library is empty
+    pub update: Mutex<Option<String>>, // a newer version published on GitHub
+    last_random: Mutex<HashMap<String, String>>, // category id -> sound its hotkey played last
     toasts: Mutex<Vec<Toast>>,
     hotkeys: OnceLock<Hotkeys<Action>>,
     saves: Mutex<Option<Sender<()>>>,
@@ -82,6 +90,8 @@ impl Core {
                 engine,
                 filter: Mutex::default(),
                 soundpad_count: Mutex::new(0),
+                update: Mutex::default(),
+                last_random: Mutex::default(),
                 toasts: Mutex::default(),
                 hotkeys: OnceLock::new(),
                 saves: Mutex::new(None),
@@ -144,7 +154,9 @@ impl Core {
                 *lock(&core.soundpad_count) = soundpad::parse_soundpad_list(&text).sounds.len();
             }
             core.detect_cable();
+            crate::autostart::follow_exe();
             core.repaint();
+            core.check_update();
         });
     }
 
@@ -173,9 +185,7 @@ impl Core {
                 self.edit(|lib| {
                     if let Some(s) = lib.sound_mut(&sound_id) {
                         s.plays += 1;
-                        if s.duration.is_none_or(|d| d <= 0.0) {
-                            s.duration = Some(duration);
-                        }
+                        s.duration = Some(duration); // the file's own, its leading silence cut
                     }
                 });
                 self.save();
@@ -191,6 +201,7 @@ impl Core {
     pub fn on_action(&self, action: &Action) {
         match action {
             Action::Play(id) => self.trigger(id),
+            Action::Random(category) => self.play_random(category),
             Action::Global(GlobalAction::StopAll) => self.engine.stop_all(),
             Action::Global(GlobalAction::PauseAll) => self.engine.toggle_pause_all(),
             Action::Global(GlobalAction::VolUp) => self.engine.nudge_volumes(VOLUME_STEP),
@@ -212,6 +223,37 @@ impl Core {
             return;
         };
         self.play(&sound, mode, exclusive);
+    }
+
+    /// One of the category's sounds at random, never the same twice in a row.
+    fn play_random(&self, category: &str) {
+        let missing = lock(&self.missing).clone();
+        let ids: Vec<String> = self.read(|l| {
+            l.categories
+                .iter()
+                .find(|c| c.id == category)
+                .map(|c| {
+                    c.sound_ids
+                        .iter()
+                        .filter(|id| !missing.contains(*id))
+                        .cloned()
+                        .collect()
+                })
+                .unwrap_or_default()
+        });
+        let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+        let seed = RandomState::new().hash_one(Instant::now());
+        let picked = {
+            let mut last = lock(&self.last_random);
+            let picked = pick_random(&ids, last.get(category).map(String::as_str), seed);
+            if let Some(id) = picked {
+                last.insert(category.to_string(), id.to_string());
+            }
+            picked
+        };
+        if let Some(id) = picked {
+            self.trigger(id);
+        }
     }
 
     /// The editor's "Listen": the settings being edited, from the start.
@@ -458,13 +500,22 @@ impl Core {
         self.repaint();
     }
 
-    /// Sounds bound to a hotkey are played blind, in game: decoded ahead of time.
+    /// Sounds bound to a hotkey, their own or their category's, are played blind, in game:
+    /// decoded ahead of time.
     pub fn preload_hotkey_sounds(&self) {
         let missing = lock(&self.missing).clone();
         let paths: Vec<String> = self.read(|l| {
+            let random: HashSet<&String> = l
+                .categories
+                .iter()
+                .filter(|c| c.hotkey.is_some())
+                .flat_map(|c| &c.sound_ids)
+                .collect();
             l.sounds
                 .iter()
-                .filter(|s| s.hotkey.is_some() && !missing.contains(&s.id))
+                .filter(|s| {
+                    (s.hotkey.is_some() || random.contains(&s.id)) && !missing.contains(&s.id)
+                })
                 .map(|s| s.path.clone())
                 .collect()
         });
@@ -581,29 +632,107 @@ impl Core {
         });
     }
 
-    pub fn remove_sound(&self, id: &str) {
-        let Some((path, had_hotkey)) = self.edit(|lib| {
-            let i = lib.sounds.iter().position(|s| s.id == id)?;
-            let sound = lib.sounds.remove(i);
+    pub fn remove_sounds(&self, ids: &[String]) {
+        let ids: HashSet<&String> = ids.iter().collect();
+        let removed: Vec<Sound> = self.edit(|lib| {
+            let (removed, kept) = std::mem::take(&mut lib.sounds)
+                .into_iter()
+                .partition(|s| ids.contains(&s.id));
+            lib.sounds = kept;
             for c in &mut lib.categories {
-                c.sound_ids.retain(|x| x != id);
+                c.sound_ids.retain(|x| !ids.contains(x));
             }
-            Some((sound.path, sound.hotkey.is_some()))
-        }) else {
+            removed
+        });
+        if removed.is_empty() {
             return;
-        };
+        }
         for v in self
             .engine
             .voices()
             .into_iter()
-            .filter(|v| v.sound_id == id)
+            .filter(|v| ids.contains(&v.sound_id))
         {
             self.engine.stop(v.id);
         }
-        self.engine.forget(&path);
+        for s in &removed {
+            self.engine.forget(&s.path);
+        }
         self.save_now();
-        if had_hotkey {
+        if removed.iter().any(|s| s.hotkey.is_some()) {
             self.apply_hotkeys();
+        }
+    }
+
+    /// Looks in `folder` for the files of the missing sounds (moved, or a renamed drive), by
+    /// their name, and points the sounds there. Files already in the library are left alone.
+    pub fn relink(&self, folder: &Path) {
+        let ids = lock(&self.missing).clone();
+        if ids.is_empty() {
+            return;
+        }
+        let (missing, known): (Vec<(String, String)>, HashSet<String>) = self.read(|l| {
+            (
+                l.sounds
+                    .iter()
+                    .filter(|s| ids.contains(&s.id))
+                    .map(|s| (s.id.clone(), s.path.clone()))
+                    .collect(),
+                l.sounds.iter().map(|s| s.path.to_lowercase()).collect(),
+            )
+        });
+        let files: Vec<String> = store::expand_paths(&[folder.to_path_buf()])
+            .into_iter()
+            .filter(|f| !known.contains(&f.to_lowercase()))
+            .collect();
+        let found = relink(&missing, &files);
+        if !found.is_empty() {
+            self.edit(|lib| {
+                for (id, path) in &found {
+                    if let Some(s) = lib.sound_mut(id) {
+                        s.path = path.clone();
+                    }
+                }
+            });
+            self.save_now();
+            self.check_missing();
+            self.preload_hotkey_sounds();
+        }
+        let left = missing.len() - found.len();
+        self.toast(
+            match (found.len(), left) {
+                (0, _) => format!(
+                    "Aucun des sons introuvables n’est dans {}",
+                    folder.display()
+                ),
+                (n, 0) => format!("{n} son{} retrouvé{0}", if n > 1 { "s" } else { "" }),
+                (n, left) => format!(
+                    "{n} retrouvé{}, {left} toujours introuvable{}",
+                    if n > 1 { "s" } else { "" },
+                    if left > 1 { "s" } else { "" }
+                ),
+            },
+            found.is_empty(),
+        );
+    }
+
+    /// Asks GitHub for the latest release; a newer one is offered in the window. A build from
+    /// the sources has no version and does not ask.
+    fn check_update(&self) {
+        let Some(current) = VERSION else { return };
+        let Ok(response) = link::get(LATEST_RELEASE_API, 1024 * 1024) else {
+            return;
+        };
+        let latest = serde_json::from_slice::<serde_json::Value>(&response.body)
+            .ok()
+            .and_then(|v| {
+                v["tag_name"]
+                    .as_str()
+                    .map(|t| t.trim_start_matches('v').to_string())
+            });
+        if let Some(v) = latest.filter(|v| is_newer(v, current)) {
+            *lock(&self.update) = Some(v);
+            self.repaint();
         }
     }
 }

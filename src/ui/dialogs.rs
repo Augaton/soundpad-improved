@@ -17,7 +17,7 @@ use crate::model::{
     Action, Cable, Device, GlobalAction, Library, Mode, Sound, filter_message, is_virtual_cable,
     resolve_device,
 };
-use crate::state::lock;
+use crate::state::{Snapshot, lock};
 
 pub struct Editor {
     pub id: String,
@@ -29,12 +29,10 @@ pub struct Editor {
     hotkey: Option<String>,
     error: Option<String>,
     categories: Vec<(String, String, bool)>, // id, name, member
-    path: String,
-    missing: bool,
 }
 
 impl Editor {
-    pub fn open(sound: &Sound, lib: &Library, missing: bool) -> Editor {
+    pub fn open(sound: &Sound, lib: &Library) -> Editor {
         Editor {
             id: sound.id.clone(),
             title: sound.title.clone(),
@@ -55,8 +53,21 @@ impl Editor {
                     )
                 })
                 .collect(),
-            path: sound.path.clone(),
-            missing,
+        }
+    }
+}
+
+/// The hotkey of a category, which plays one of its sounds at random.
+pub struct CategoryHotkey {
+    id: String,
+    error: Option<String>,
+}
+
+impl CategoryHotkey {
+    pub fn new(id: &str) -> CategoryHotkey {
+        CategoryHotkey {
+            id: id.to_string(),
+            error: None,
         }
     }
 }
@@ -82,7 +93,7 @@ impl LinkDialog {
 
 pub enum Confirm {
     RemoveCategory { id: String, name: String },
-    RemoveSound { id: String, title: String },
+    RemoveSounds { ids: Vec<String>, label: String }, // label: "« title »", or "12 sons"
 }
 
 fn dialog_frame() -> Frame {
@@ -186,15 +197,18 @@ fn cable_combo(ui: &mut Ui, cable: &mut Cable, names: &[String]) {
 }
 
 impl App {
-    pub(super) fn dialogs(&mut self, ctx: &Context, lib: &Library, status: &Status) {
+    pub(super) fn dialogs(&mut self, ctx: &Context, snap: &Snapshot, status: &Status) {
         if self.editor.is_some() {
-            self.editor_ui(ctx, lib);
+            self.editor_ui(ctx, snap);
         }
         if self.settings {
-            self.settings_ui(ctx, lib, status);
+            self.settings_ui(ctx, snap, status);
         }
         if self.link.is_some() {
             self.link_ui(ctx);
+        }
+        if self.category_hotkey.is_some() {
+            self.category_hotkey_ui(ctx, &snap.lib);
         }
         if self.confirm.is_some() {
             self.confirm_ui(ctx);
@@ -203,6 +217,18 @@ impl App {
 
     fn escape(&self, ctx: &Context) -> bool {
         self.capture.is_none() && ctx.input(|i| i.key_pressed(Key::Escape))
+    }
+
+    /// Asks for a folder, then looks there for the files of the sounds that are missing.
+    fn find_missing(&mut self) {
+        let Some(folder) = rfd::FileDialog::new()
+            .set_title("Dossier où chercher les sons introuvables")
+            .pick_folder()
+        else {
+            return;
+        };
+        let core = self.core.clone();
+        std::thread::spawn(move || core.relink(&folder));
     }
 
     pub(super) fn start_capture(&mut self, target: Target) {
@@ -237,6 +263,30 @@ impl App {
                         }
                     }
                 }
+                Target::Category => {
+                    if let Some(d) = &mut self.category_hotkey {
+                        let id = d.id.clone();
+                        let owner = self.core.edit(|lib| {
+                            let owner = lib.hotkey_owner(&accel, &Action::Random(id.clone()));
+                            if owner.is_none()
+                                && let Some(c) = lib.categories.iter_mut().find(|c| c.id == id)
+                            {
+                                c.hotkey = Some(accel.clone());
+                            }
+                            owner
+                        });
+                        d.error = owner.map(|owner| {
+                            format!(
+                                "{} est déjà utilisé par {owner}.",
+                                format_accelerator(&accel)
+                            )
+                        });
+                        if d.error.is_none() {
+                            self.core.save();
+                            self.core.preload_hotkey_sounds();
+                        }
+                    }
+                }
                 Target::Global(a) => {
                     let owner = self.core.edit(|lib| {
                         let owner = lib.hotkey_owner(&accel, &Action::Global(a));
@@ -265,13 +315,22 @@ impl App {
 
     // ---------- Sound editor ----------
 
-    fn editor_ui(&mut self, ctx: &Context, lib: &Library) {
+    fn editor_ui(&mut self, ctx: &Context, snap: &Snapshot) {
+        let lib = &snap.lib;
         let capturing = self
             .capture
             .as_ref()
             .is_some_and(|c| c.target == Target::Sound);
-        let (mut save, mut cancel, mut preview, mut remove, mut capture) =
-            (false, false, false, false, false);
+        let (mut save, mut cancel, mut preview, mut remove, mut capture, mut find) =
+            (false, false, false, false, false, false);
+        let Some(id) = self.editor.as_ref().map(|ed| ed.id.clone()) else {
+            return;
+        };
+        let Some(sound) = lib.sound(&id) else {
+            self.editor = None; // removed meanwhile
+            return;
+        };
+        let missing = snap.missing.contains(&id);
         let Some(ed) = self.editor.as_mut() else {
             return;
         };
@@ -368,19 +427,25 @@ impl App {
                 ui.add_space(6.0);
                 ui.checkbox(&mut ed.favorite, "Favori");
                 ui.add_space(6.0);
-                let path = if ed.missing {
-                    format!("{} (introuvable)", ed.path)
+                let path = if missing {
+                    format!("{} (introuvable)", sound.path)
                 } else {
-                    ed.path.clone()
+                    sound.path.clone()
                 };
                 ui.add(
                     egui::Label::new(
                         RichText::new(path)
-                            .color(if ed.missing { DANGER } else { TEXT_3 })
+                            .color(if missing { DANGER } else { TEXT_3 })
                             .size(12.0),
                     )
                     .wrap(),
                 );
+                if missing {
+                    find = ui
+                        .button("Chercher dans un dossier…")
+                        .on_hover_text("Retrouve les fichiers déplacés, d’après leur nom")
+                        .clicked();
+                }
                 ui.add_space(16.0);
                 ui.horizontal(|ui| {
                     remove = danger(ui, "Retirer de la bibliothèque").clicked();
@@ -394,18 +459,18 @@ impl App {
         if capture {
             self.start_capture(Target::Sound);
         }
+        if find {
+            self.find_missing();
+        }
         if remove {
             let ed = self.editor.as_ref().unwrap();
-            self.confirm = Some(Confirm::RemoveSound {
-                id: ed.id.clone(),
-                title: ed.title.clone(),
+            self.confirm = Some(Confirm::RemoveSounds {
+                ids: vec![ed.id.clone()],
+                label: format!("« {} »", ed.title),
             });
         }
-        if preview
-            && let Some(ed) = &self.editor
-            && let Some(s) = lib.sound(&ed.id)
-        {
-            let mut s = s.clone();
+        if preview && let Some(ed) = &self.editor {
+            let mut s = sound.clone();
             s.volume = f64::from(ed.volume);
             s.rate = f64::from(ed.rate);
             self.core.preview(&s);
@@ -460,13 +525,15 @@ impl App {
 
     // ---------- Settings ----------
 
-    fn settings_ui(&mut self, ctx: &Context, lib: &Library, status: &Status) {
-        let before = lib.settings.clone();
+    fn settings_ui(&mut self, ctx: &Context, snap: &Snapshot, status: &Status) {
+        let before = snap.lib.settings.clone();
         let mut s = before.clone();
         let capturing = self.capture.as_ref().and_then(|c| match c.target {
             Target::Global(a) => Some(a),
-            Target::Sound => None,
+            Target::Sound | Target::Category => None,
         });
+        let mut autostart = self.autostart;
+        let mut find = false;
         let (filter_status, busy) = {
             let f = lock(&self.core.filter);
             (f.status.clone(), f.busy)
@@ -568,10 +635,25 @@ impl App {
                     "Un raccourci global marche partout, même en jeu, mais sa touche n’arrive plus aux autres applis. Préfère le pavé numérique, Pause, F13 à F24 ou une combinaison avec Ctrl ou Alt.",
                 );
 
+                section(ui, "Démarrage et fermeture");
+                ui.checkbox(&mut s.close_to_tray, "Fermer la fenêtre la range dans la zone de notification : les raccourcis restent actifs");
+                ui.checkbox(&mut autostart, "Lancer avec Windows, rangé dans la zone de notification");
+                hint(ui, "Clic droit sur l’icône de la zone de notification pour quitter pour de bon.");
+
                 section(ui, "Bibliothèque");
                 hint(ui, "Les sons, catégories et raccourcis de Soundpad. Son fichier est seulement lu, jamais modifié.");
                 import = ui.button("Importer depuis Soundpad").clicked();
-                hint(ui, &format!("Ta bibliothèque : {}", crate::store::data_dir().join("library.json").display()));
+                let missing = snap.missing.len();
+                if missing > 0 {
+                    ui.add_space(6.0);
+                    hint(ui, &format!("{missing} son{} introuvable{0} : fichier déplacé, renommé ou supprimé.", if missing > 1 { "s" } else { "" }));
+                    find = ui.button("Chercher dans un dossier…").on_hover_text("Retrouve les fichiers déplacés, d’après leur nom").clicked();
+                }
+                ui.add_space(6.0);
+                hint(ui, &format!("Ta bibliothèque : {}. Celle d’avant le dernier lancement est gardée dans library.json.bak.", crate::store::data_dir().join("library.json").display()));
+                if let Some(v) = crate::state::VERSION {
+                    hint(ui, &format!("Soundpad Improved {v}"));
+                }
                 ui.add_space(4.0);
             });
             ui.add_space(14.0);
@@ -607,11 +689,22 @@ impl App {
             self.settings_error = None;
             self.start_capture(Target::Global(a));
         }
+        if autostart != self.autostart {
+            match crate::autostart::set(autostart) {
+                Ok(()) => self.autostart = autostart,
+                Err(e) => self
+                    .core
+                    .toast(format!("Lancement avec Windows : {e}"), true),
+            }
+        }
         if let Some(action) = filter_action {
             self.core.run_filter(action);
         }
         if import {
             self.import_soundpad();
+        }
+        if find {
+            self.find_missing();
         }
         if close || self.escape(ctx) {
             if capturing.is_some() {
@@ -703,6 +796,80 @@ impl App {
         }
     }
 
+    // ---------- Category hotkey ----------
+
+    fn category_hotkey_ui(&mut self, ctx: &Context, lib: &Library) {
+        let capturing = self
+            .capture
+            .as_ref()
+            .is_some_and(|c| c.target == Target::Category);
+        let escape = self.escape(ctx);
+        let Some(d) = &self.category_hotkey else {
+            return;
+        };
+        let Some(category) = lib.categories.iter().find(|c| c.id == d.id) else {
+            self.category_hotkey = None; // removed meanwhile
+            return;
+        };
+        let (mut capture, mut clear, mut close) = (false, false, false);
+        Modal::new(Id::unique("category-hotkey"))
+            .frame(dialog_frame())
+            .backdrop_color(egui::Color32::from_black_alpha(150))
+            .show(ctx, |ui| {
+                ui.set_width(420.0);
+                ui.add(
+                    egui::Label::new(
+                        RichText::new(format!("Raccourci de « {} »", category.name)).heading(),
+                    )
+                    .wrap(),
+                );
+                ui.add_space(4.0);
+                hint(
+                    ui,
+                    "Il joue un des sons de la catégorie au hasard, jamais deux fois le même de suite.",
+                );
+                ui.add_space(10.0);
+                ui.horizontal(|ui| {
+                    capture = hotkey_button(
+                        ui,
+                        category.hotkey.as_ref(),
+                        capturing,
+                        "Raccourci : un son au hasard",
+                    );
+                    clear = category.hotkey.is_some() && ui.button("Effacer").clicked();
+                });
+                if let Some(e) = &d.error {
+                    ui.label(RichText::new(e).color(DANGER));
+                }
+                ui.add_space(16.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    close = primary(ui, "Fermer").clicked();
+                });
+            });
+        if capture {
+            if let Some(d) = &mut self.category_hotkey {
+                d.error = None;
+            }
+            self.start_capture(Target::Category);
+        }
+        if clear {
+            let id = category.id.clone();
+            self.core.edit(|lib| {
+                if let Some(c) = lib.categories.iter_mut().find(|c| c.id == id) {
+                    c.hotkey = None;
+                }
+            });
+            self.core.save();
+            self.core.apply_hotkeys();
+        }
+        if close || escape {
+            if capturing {
+                self.finish_capture(None);
+            }
+            self.category_hotkey = None;
+        }
+    }
+
     // ---------- Confirmation ----------
 
     fn confirm_ui(&mut self, ctx: &Context) {
@@ -713,9 +880,13 @@ impl App {
                 "Ses sons restent dans la bibliothèque.",
                 "Supprimer",
             ),
-            Confirm::RemoveSound { title, .. } => (
-                format!("Retirer « {title} » de la bibliothèque ?"),
-                "Le fichier audio reste sur le disque.",
+            Confirm::RemoveSounds { ids, label } => (
+                format!("Retirer {label} de la bibliothèque ?"),
+                if ids.len() > 1 {
+                    "Les fichiers audio restent sur le disque."
+                } else {
+                    "Le fichier audio reste sur le disque."
+                },
                 "Retirer",
             ),
         };
@@ -749,15 +920,25 @@ impl App {
         }
         match self.confirm.take() {
             Some(Confirm::RemoveCategory { id, .. }) => {
-                self.core.edit(|lib| lib.categories.retain(|c| c.id != id));
+                let had_hotkey = self.core.edit(|lib| {
+                    let had = lib
+                        .categories
+                        .iter()
+                        .any(|c| c.id == id && c.hotkey.is_some());
+                    lib.categories.retain(|c| c.id != id);
+                    had
+                });
                 if self.view == View::Category(id) {
-                    self.view = View::All;
+                    self.set_view(View::All);
                 }
                 self.core.save_now();
+                if had_hotkey {
+                    self.core.apply_hotkeys();
+                }
             }
-            Some(Confirm::RemoveSound { id, .. }) => {
+            Some(Confirm::RemoveSounds { ids, .. }) => {
                 self.editor = None;
-                self.core.remove_sound(&id);
+                self.core.remove_sounds(&ids);
             }
             None => {}
         }

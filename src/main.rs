@@ -2,6 +2,7 @@
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod audio;
+mod autostart;
 mod filter;
 mod hotkeys;
 mod keys;
@@ -37,7 +38,8 @@ pub fn open_url(url: &str) {
     };
 }
 
-/// A second instance would fight the first one over the hotkeys: it brings the first one up.
+/// A second instance would fight the first one over the hotkeys: it brings the first one up,
+/// through its notification-area icon (the window may be hidden there).
 /// A test profile (SPI_USER_DATA) runs beside the everyday one.
 fn already_running() -> bool {
     let mut name = "Local\\SoundpadImprovedInstance".to_string();
@@ -52,6 +54,9 @@ fn already_running() -> bool {
     if mutex.is_err() || unsafe { GetLastError() } != ERROR_ALREADY_EXISTS {
         std::mem::forget(mutex); // held until the process exits
         return false;
+    }
+    if ui::wake_running() {
+        return true;
     }
     if let Ok(hwnd) = unsafe { FindWindowW(None, w!("Soundpad Improved")) } {
         unsafe {
@@ -68,10 +73,12 @@ fn main() -> eframe::Result {
     if already_running() {
         return Ok(());
     }
+    let hidden = std::env::args().any(|a| a == autostart::HIDDEN);
     let core = state::Core::new();
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default()
             .with_title(TITLE)
+            .with_icon(ui::window_icon())
             .with_inner_size([1320.0, 840.0])
             .with_min_inner_size([960.0, 600.0])
             .with_drag_and_drop(true),
@@ -80,6 +87,6 @@ fn main() -> eframe::Result {
     eframe::run_native(
         TITLE,
         options,
-        Box::new(move |cc| Ok(Box::new(ui::App::new(cc, core)))),
+        Box::new(move |cc| Ok(Box::new(ui::App::new(cc, core, hidden)))),
     )
 }

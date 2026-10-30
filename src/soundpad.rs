@@ -272,6 +272,7 @@ pub fn merge_import(library: &mut Library, parsed: &Parsed) -> (usize, usize) {
                     id: new_id(),
                     name: pc.name.clone(),
                     sound_ids: Vec::new(),
+                    hotkey: None,
                 });
                 library.categories.last_mut().unwrap()
             }

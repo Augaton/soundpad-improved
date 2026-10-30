@@ -2,10 +2,12 @@
 use std::fs::File;
 use std::path::Path;
 
+use std::sync::LazyLock;
+
 use rubato::audioadapter_buffers::direct::InterleavedSlice;
 use rubato::{Fft, FixedSync, Resampler};
 use symphonia::core::codecs::audio::AudioDecoderOptions;
-use symphonia::core::codecs::audio::well_known::CODEC_ID_OPUS;
+use symphonia::core::codecs::registry::CodecRegistry;
 use symphonia::core::errors::Error;
 use symphonia::core::formats::probe::Hint;
 use symphonia::core::formats::{FormatOptions, TrackType};
@@ -18,6 +20,17 @@ pub const RATE: u32 = 48000;
 const MAX_AUDIO_BYTES: u64 = 512 * 1024 * 1024;
 const MAX_MINUTES: u64 = 20; // a small compressed file can unpack to hours: memory stays bounded
 const RATES: std::ops::RangeInclusive<u32> = 8000..=384_000;
+const SILENCE: f32 = 0.003_16; // -50 dBFS
+const PRE_ROLL: usize = RATE as usize / 200; // 5 ms kept before the first sound, for the attack
+
+/// Symphonia's decoders, and libopus for Opus (Discord voice messages, YouTube's webm), which
+/// Symphonia does not decode.
+static CODECS: LazyLock<CodecRegistry> = LazyLock::new(|| {
+    let mut codecs = CodecRegistry::new();
+    symphonia::default::register_enabled_codecs(&mut codecs);
+    codecs.register_audio_decoder::<symphonia_adapter_libopus::OpusDecoder>();
+    codecs
+});
 
 /// Decoded sound: interleaved stereo at RATE, kept in 16 bits (half the memory of floats, CD
 /// quality), and the gain that evens out its loudness.
@@ -87,10 +100,7 @@ pub fn decode(path: &str) -> Result<Pcm, String> {
         .as_ref()
         .and_then(|p| p.audio())
         .ok_or("aucune piste audio")?;
-    if params.codec == CODEC_ID_OPUS {
-        return Err("le format Opus n’est pas pris en charge".into());
-    }
-    let mut decoder = symphonia::default::get_codecs()
+    let mut decoder = CODECS
         .make_audio_decoder(params, &AudioDecoderOptions::default())
         .map_err(|_| "codec non pris en charge".to_string())?;
     let track_id = track.id;
@@ -139,8 +149,19 @@ pub fn decode(path: &str) -> Result<Pcm, String> {
     } else {
         resample(&stereo, rate)?
     };
-    let (peak, rms) = analyse(&stereo, 2, RATE);
-    Ok(Pcm::new(&stereo, normalize_gain(peak, rms)))
+    // The silence some files start with would delay the sound after the key press.
+    let stereo = &stereo[2 * leading_silence(&stereo)..];
+    let (peak, rms) = analyse(stereo, 2, RATE);
+    Ok(Pcm::new(stereo, normalize_gain(peak, rms)))
+}
+
+/// Frames of silence at the start of interleaved stereo, minus PRE_ROLL. A sound silent all
+/// along is kept whole.
+fn leading_silence(stereo: &[f32]) -> usize {
+    stereo
+        .iter()
+        .position(|s| s.abs() > SILENCE)
+        .map_or(0, |i| (i / 2).saturating_sub(PRE_ROLL))
 }
 
 fn to_stereo(samples: &[f32], channels: usize) -> Vec<f32> {
@@ -208,6 +229,24 @@ mod tests {
             decode(r"C:\Windows\win.ini").err().as_deref(),
             Some("fichier audio refusé")
         );
+    }
+
+    #[test]
+    fn leading_silence_is_cut_but_the_attack_is_kept() {
+        let mut stereo = vec![0.0f32; 2 * 4800]; // 100 ms
+        stereo.extend([0.5, 0.5, 0.0, 0.0]);
+        assert_eq!(leading_silence(&stereo), 4800 - PRE_ROLL);
+        assert_eq!(leading_silence(&[0.001; 960]), 0, "silent all along");
+        assert_eq!(leading_silence(&[0.5, 0.5]), 0);
+        assert_eq!(leading_silence(&[]), 0);
+    }
+
+    #[test]
+    fn opus_is_decoded_and_its_silence_cut() {
+        // 0.3 s of silence, then 1 s of 440 Hz, stereo, Ogg Opus.
+        let path = concat!(env!("CARGO_MANIFEST_DIR"), r"\src\audio\testdata\tone.opus");
+        let pcm = decode(path).unwrap();
+        assert!((pcm.duration() - 1.0).abs() < 0.02, "{} s", pcm.duration());
     }
 
     #[test]

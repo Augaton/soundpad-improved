@@ -9,7 +9,8 @@ use crate::model::GlobalAction;
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Target {
-    Sound, // the sound being edited
+    Sound,    // the sound being edited
+    Category, // the category whose hotkey is being set
     Global(GlobalAction),
 }
 

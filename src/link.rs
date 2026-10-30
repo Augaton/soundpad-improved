@@ -282,7 +282,7 @@ fn extension(url: &str, content_type: &str) -> Option<&'static str> {
         Some(match ct {
             "audio/mpeg" | "audio/mp3" => "mp3",
             "audio/wav" | "audio/x-wav" | "audio/wave" => "wav",
-            "audio/ogg" => "ogg",
+            "audio/ogg" | "audio/opus" => "ogg",
             "audio/flac" | "audio/x-flac" => "flac",
             "audio/mp4" | "audio/x-m4a" | "audio/aac" => "m4a",
             "audio/webm" => "webm",
@@ -410,9 +410,9 @@ fn parse_https(url: &str) -> Result<HttpsUrl, String> {
     })
 }
 
-struct Response {
+pub struct Response {
     content_type: String,
-    body: Vec<u8>,
+    pub body: Vec<u8>,
 }
 
 struct Handle(*mut c_void);
@@ -438,7 +438,7 @@ fn opened(h: *mut c_void) -> Result<Handle, String> {
 }
 
 /// GET over HTTPS (redirects followed, never down to http). Fails past `max` bytes.
-fn get(url: &str, max: usize) -> Result<Response, String> {
+pub fn get(url: &str, max: usize) -> Result<Response, String> {
     let u = parse_https(url)?;
     let (host, path) = (wide(&u.host), wide(&u.path));
     let err = |e: windows::core::Error| e.message();

@@ -199,6 +199,7 @@ pub struct Pad<'a> {
     pub hotkey_failed: bool,
     pub favorite: bool,
     pub missing: bool,
+    pub selected: bool,
     pub playing: usize,
     pub progress: Option<f32>,
 }
@@ -211,10 +212,20 @@ pub enum PadAction {
 
 pub const PAD_HEIGHT: f32 = 80.0;
 
-/// One sound of the grid: click plays, right click or ••• edits.
-pub fn pad(ui: &mut Ui, rect: Rect, id: Id, p: &Pad) -> (PadAction, Response) {
-    let resp = ui.interact(rect, id, Sense::click());
-    resp.widget_info(|| WidgetInfo::labeled(Role::Button, true, p.title));
+/// One sound of the grid: click plays, right click or ••• edits. A `draggable` one can also be
+/// dragged (the grid moves it).
+pub fn pad(ui: &mut Ui, rect: Rect, id: Id, p: &Pad, draggable: bool) -> (PadAction, Response) {
+    let sense = if draggable {
+        Sense::click_and_drag()
+    } else {
+        Sense::click()
+    };
+    let resp = ui.interact(rect, id, sense);
+    resp.widget_info(|| {
+        let mut info = WidgetInfo::labeled(Role::Button, true, p.title);
+        info.selected = p.selected.then_some(true);
+        info
+    });
     let edit_rect = Rect::from_min_size(
         pos2(rect.right() - 32.0, rect.top() + 6.0),
         vec2(26.0, 24.0),
@@ -237,7 +248,7 @@ pub fn pad(ui: &mut Ui, rect: Rect, id: Id, p: &Pad) -> (PadAction, Response) {
         (false, false) => SURFACE_2,
     };
     painter.rect_filled(body, RADIUS, fill);
-    if resp.has_focus() || edit.has_focus() {
+    if resp.has_focus() || edit.has_focus() || p.selected {
         painter.rect_stroke(body, RADIUS, Stroke::new(2.0, ACCENT), StrokeKind::Inside);
     } else if p.playing > 0 {
         painter.rect_stroke(body, RADIUS, Stroke::new(1.0, ACCENT), StrokeKind::Inside);
@@ -324,6 +335,15 @@ pub fn pad(ui: &mut Ui, rect: Rect, id: Id, p: &Pad) -> (PadAction, Response) {
         ui.painter().rect_filled(bar, 1, ACCENT);
     }
 
+    if p.selected && !hovered && !edit.has_focus() {
+        ui.painter().text(
+            edit_rect.center(),
+            Align2::CENTER_CENTER,
+            I_CHECK,
+            icon_font(13.0),
+            ACCENT,
+        );
+    }
     if hovered || edit.has_focus() {
         let p = ui.painter();
         if edit.hovered() {

@@ -48,6 +48,8 @@ pub const I_STAR: &str = "\u{E735}";
 pub const I_MORE: &str = "\u{E712}";
 pub const I_SAVE: &str = "\u{E74E}";
 pub const I_WARNING: &str = "\u{E7BA}";
+pub const I_CHECK: &str = "\u{E73E}";
+pub const I_UPDATE: &str = "\u{E896}"; // download
 
 pub fn strong() -> FontFamily {
     FontFamily::Name("strong".into())
@@ -59,6 +61,52 @@ pub fn icons() -> FontFamily {
 
 pub fn icon_font(size: f32) -> FontId {
     FontId::new(size, icons())
+}
+
+/// The app's icon, drawn: three dark sound bars on an amber rounded square. RGBA, `size` × `size`,
+/// edges smoothed by 4 × 4 samples per pixel.
+pub fn app_icon(size: u32) -> Vec<u8> {
+    let n = size as f32;
+    let radius = n * 0.22;
+    let bar_width = n * 0.13;
+    let bars = [(0.29, 0.40), (0.50, 0.64), (0.71, 0.40)]; // (center x, height), of the size
+    let in_square = |x: f32, y: f32| {
+        let dx = (radius - x).max(x - (n - radius)).max(0.0);
+        let dy = (radius - y).max(y - (n - radius)).max(0.0);
+        dx * dx + dy * dy <= radius * radius
+    };
+    let in_bar = |x: f32, y: f32| {
+        bars.iter().any(|&(cx, h)| {
+            (x - cx * n).abs() <= bar_width / 2.0 && (y - n / 2.0).abs() <= h * n / 2.0
+        })
+    };
+    let mut rgba = Vec::with_capacity((size * size * 4) as usize);
+    for py in 0..size {
+        for px in 0..size {
+            let (mut square, mut bar) = (0u32, 0u32);
+            for s in 0..16 {
+                let x = px as f32 + ((s % 4) as f32 + 0.5) / 4.0;
+                let y = py as f32 + ((s / 4) as f32 + 0.5) / 4.0;
+                if in_square(x, y) {
+                    square += 1;
+                    bar += u32::from(in_bar(x, y));
+                }
+            }
+            let t = if square > 0 {
+                bar as f32 / square as f32
+            } else {
+                0.0
+            };
+            let mix = |a: u8, b: u8| (f32::from(a) * (1.0 - t) + f32::from(b) * t).round() as u8;
+            rgba.extend([
+                mix(ACCENT.r(), ACCENT_TEXT.r()),
+                mix(ACCENT.g(), ACCENT_TEXT.g()),
+                mix(ACCENT.b(), ACCENT_TEXT.b()),
+                (square * 255 / 16) as u8,
+            ]);
+        }
+    }
+    rgba
 }
 
 fn system_font(names: &[&str]) -> Option<Vec<u8>> {

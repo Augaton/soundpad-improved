@@ -17,8 +17,13 @@ Soundboard pour Windows, pensée comme un Soundpad amélioré.
   seulement lu, jamais modifié.
 - **Sons en ligne** : colle le lien d'un son Voicemod Tuna ou MyInstants, ou d'un fichier audio :
   l'appli le télécharge et l'ajoute, sous son titre.
-- Recherche insensible aux accents, tri par titre ou par sons les plus joués, favoris, catégories,
-  glisser-déposer de fichiers et de dossiers.
+- **Un raccourci par catégorie** qui joue un de ses sons au hasard, jamais deux fois le même de suite.
+- **Toujours là** : fermer la fenêtre la range dans la zone de notification, et l'appli peut se
+  lancer avec Windows. Elle prévient quand une nouvelle version est publiée.
+- Recherche insensible aux accents, tri par titre, par sons les plus joués ou dans ton ordre (glisse
+  un son pour le déplacer), favoris, catégories, sélection de plusieurs sons à la fois,
+  glisser-déposer de fichiers et de dossiers. Les sons dont le fichier a été déplacé se retrouvent
+  en indiquant le dossier où chercher. Le silence au début d'un son est coupé : il part dès la touche.
 
 ## Pourquoi une appli à part, et pas un mod de Soundpad
 
@@ -39,7 +44,8 @@ quand même ». Il reprend la bibliothèque de la version Electron telle quelle.
 
 Depuis les sources :
 
-1. Installe Rust (https://rustup.rs) et le g++ de MSYS2 (UCRT64), dans le PATH.
+1. Installe Rust (https://rustup.rs), CMake (pour libopus, le décodeur Opus) et le g++ de MSYS2
+   (UCRT64), dans le PATH.
 2. Compile le filtre micro : `native\build.cmd`. L'appli l'embarque si `native\bin` existe au moment
    de la compiler.
 3. `cargo run --release`, ou `cargo build --release` : l'exe est dans `target\release`.
@@ -69,6 +75,9 @@ Cable) »**. Pour réduire ton bruit de fond, coche « Réduction de bruit sur m
 |---|---|
 | Clic sur un son | Le joue, selon son comportement (superposer par défaut) |
 | Clic droit, ou bouton `•••` | Modifier : titre, volume et vitesse par défaut, comportement, raccourci, catégories, favori |
+| Ctrl+clic, Maj+clic, Ctrl+A | Sélectionne plusieurs sons : les ranger, les mettre en favori, les retirer. Échap désélectionne |
+| Glisser un son | Le déplace, avec le tri « Mon ordre » et sans recherche en cours |
+| Clic droit sur une catégorie | Son raccourci, qui joue un de ses sons au hasard |
 | Panneau « En cours » | Volume, vitesse, position, boucle, pause et arrêt de chaque instance |
 | Bouton « Garder » | Enregistre le volume et la vitesse de l'instance comme réglages du son |
 | Ctrl+F | Recherche |
@@ -81,18 +90,21 @@ Ctrl ou Alt.
 
 ## Données
 
-La bibliothèque et les réglages sont dans `%APPDATA%\soundpad-improved\library.json`. Les fichiers
+La bibliothèque et les réglages sont dans `%APPDATA%\soundpad-improved\library.json`. À chaque
+lancement, sa version d'alors est copiée dans `library.json.bak` : après une erreur, ferme l'appli
+(clic droit sur l'icône, « Quitter ») et remets ce fichier à la place de `library.json`. Les fichiers
 audio restent où ils sont : retirer un son de la bibliothèque ne supprime jamais le fichier. Les
 sons ajoutés depuis un lien sont enregistrés dans `%APPDATA%\soundpad-improved\sons`.
 
 ## Formats
 
-mp3, wav, ogg et webm (Vorbis), flac, m4a et aac, aiff. L'Opus n'est pas pris en charge : un tel
-fichier affiche « Lecture impossible ».
+mp3, wav, ogg, opus et webm (Vorbis ou Opus, dont les messages vocaux de Discord), flac, m4a et aac,
+aiff.
 
 ## Développement
 
 ```
+cargo fmt --check; cargo clippy --all-targets -- -D warnings   # vérifiés par la CI
 cargo test                            # logique, mélangeur, limiteur, anneau du filtre, décodage
 cargo test -- --ignored               # téléchargement réel depuis Voicemod Tuna et MyInstants
 native\build.cmd                      # filtre micro (g++ de MSYS2), avant cargo build pour l'embarquer
@@ -104,9 +116,12 @@ cargo run
 - `src/state.rs` : l'état de l'appli et ses actions (lecture, sauvegarde, raccourcis, filtre),
   partagés entre la fenêtre et le fil des raccourcis : un raccourci joue même fenêtre réduite.
 - `src/ui/` : l'interface (egui). `mod.rs` la fenêtre, `dialogs.rs` l'éditeur de son et les
-  réglages, `widgets.rs` les pads et curseurs, `theme.rs` couleurs et polices (celles de Windows),
-  `capture.rs` la saisie d'un raccourci, qui lit l'état des touches de Windows.
-- `src/audio/decode.rs` : fichier vers PCM stéréo 48 kHz (symphonia, rubato), gain d'égalisation.
+  réglages, `widgets.rs` les pads et curseurs, `theme.rs` couleurs, polices (celles de Windows) et
+  icône, `capture.rs` la saisie d'un raccourci, qui lit l'état des touches de Windows, `tray.rs`
+  l'icône de la zone de notification.
+- `src/autostart.rs` : le lancement avec Windows (clé `Run` de l'utilisateur).
+- `src/audio/decode.rs` : fichier vers PCM stéréo 48 kHz (symphonia, libopus, rubato), silence de
+  début coupé, gain d'égalisation.
 - `src/audio/mixer.rs` : les voix, rendues par chaque sortie avec son propre curseur.
 - `src/audio/engine.rs` : cache de décodage, sorties (cpal), ta voix et sa réduction de bruit
   (RNNoise), limiteur, et l'envoi au filtre micro au rythme de 48 kHz.

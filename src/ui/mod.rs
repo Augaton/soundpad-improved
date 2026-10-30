@@ -3,29 +3,40 @@
 mod capture;
 mod dialogs;
 mod theme;
+mod tray;
 mod widgets;
 
 use std::collections::{HashMap, HashSet};
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use eframe::egui::{
-    self, Align, Align2, CentralPanel, ComboBox, Context, Frame, Id, Key, KeyboardShortcut, Label,
-    Layout, Margin, Modifiers, Panel, Rect, RichText, ScrollArea, Sense, Stroke, StrokeKind,
-    TextEdit, Ui, pos2, vec2,
+    self, Align, Align2, CentralPanel, ComboBox, Context, CursorIcon, Frame, Id, Key,
+    KeyboardShortcut, Label, Layout, Margin, Modifiers, Panel, Rect, RichText, ScrollArea, Sense,
+    Stroke, StrokeKind, TextEdit, Ui, ViewportCommand, pos2, vec2,
 };
 
 use crate::audio::engine::Status;
 use crate::audio::mixer::{CABLE, MONITOR, VoiceInfo};
 use crate::keys;
-use crate::model::{Cable, Category, Library, Sound, search_key};
+use crate::model::{Cable, Category, Library, Sound, reorder, search_key};
 use crate::state::{Core, Snapshot, Toast, lock};
 use crate::store;
 use capture::Capture;
-use dialogs::{Confirm, Editor, LinkDialog};
+use dialogs::{CategoryHotkey, Confirm, Editor, LinkDialog};
 use theme::*;
+pub use tray::wake_running;
 use widgets::*;
+
+pub fn window_icon() -> egui::IconData {
+    egui::IconData {
+        rgba: app_icon(64),
+        width: 64,
+        height: 64,
+    }
+}
 
 #[derive(Clone, PartialEq)]
 enum View {
@@ -36,7 +47,7 @@ enum View {
 
 #[derive(Clone, Copy, PartialEq)]
 enum Sort {
-    Added,
+    Manual, // the order of the library, or of the category; sounds are dragged to change it
     Title,
     Plays,
 }
@@ -44,11 +55,18 @@ enum Sort {
 impl Sort {
     fn label(self) -> &'static str {
         match self {
-            Sort::Added => "Ordre d’ajout",
+            Sort::Manual => "Mon ordre",
             Sort::Title => "Titre",
             Sort::Plays => "Les plus joués",
         }
     }
+}
+
+/// A sound being dragged to a new place in the grid.
+struct Drag {
+    id: String,
+    title: String,
+    target: Option<(String, bool)>, // the sound it goes next to, after it (true) or before
 }
 
 pub struct App {
@@ -60,48 +78,101 @@ pub struct App {
     editor: Option<Editor>,
     settings: bool,
     settings_error: Option<String>,
+    autostart: bool, // read from the registry when the settings open
     confirm: Option<Confirm>,
     link: Option<LinkDialog>,
+    category_hotkey: Option<CategoryHotkey>,
     capture: Option<Capture>,
     toasts: Vec<Toast>,
     meter: f32,
     seeking: HashMap<u64, f32>, // voice id -> position (0..1) while its bar is dragged
     warm: HashSet<String>,      // sounds already decoded ahead on hover
+    selected: HashSet<String>,  // sound ids, picked with Ctrl or Shift + click
+    anchor: Option<String>,     // where a Shift + click range starts
+    drag: Option<Drag>,
     focus_search: bool,
     snap: Arc<Snapshot>, // the library as drawn, taken again only when it changed
     rev: u64,
     visible: Vec<usize>, // indices of the sounds shown, for (revision, view, query, sort)
     visible_for: Option<(u64, View, String, Sort)>,
+    tray: Option<tray::Tray>,
+    quitting: Arc<AtomicBool>, // "Quitter" in the icon's menu: the window closes for real
+    hide_at_start: bool,       // launched with Windows: straight to the notification area
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>, core: Arc<Core>) -> App {
+    pub fn new(cc: &eframe::CreationContext<'_>, core: Arc<Core>, hidden: bool) -> App {
         theme::install(&cc.egui_ctx);
         theme::dark_title_bar(cc);
         core.start(cc.egui_ctx.clone());
         let snap = Arc::new(core.snapshot());
+        let quitting = Arc::new(AtomicBool::new(false));
+        let tray = {
+            let (ctx, core, quitting) = (cc.egui_ctx.clone(), core.clone(), quitting.clone());
+            tray::start(move |command| match command {
+                tray::Command::Show => {
+                    ctx.send_viewport_cmd(ViewportCommand::Visible(true));
+                    ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
+                    ctx.send_viewport_cmd(ViewportCommand::Focus);
+                    ctx.request_repaint();
+                }
+                tray::Command::StopAll => core.engine.stop_all(),
+                tray::Command::Quit => {
+                    quitting.store(true, Ordering::Relaxed);
+                    ctx.send_viewport_cmd(ViewportCommand::Close);
+                    ctx.request_repaint();
+                }
+            })
+        };
         App {
             core,
             view: View::All,
             query: String::new(),
-            sort: Sort::Added,
+            sort: Sort::Manual,
             new_category: String::new(),
             editor: None,
             settings: false,
             settings_error: None,
+            autostart: false,
             confirm: None,
             link: None,
+            category_hotkey: None,
             capture: None,
             toasts: Vec::new(),
             meter: 0.0,
             seeking: HashMap::new(),
             warm: HashSet::new(),
+            selected: HashSet::new(),
+            anchor: None,
+            drag: None,
             focus_search: false,
             snap,
             rev: u64::MAX,
             visible: Vec::new(),
             visible_for: None,
+            hide_at_start: hidden && tray.is_some(),
+            tray,
+            quitting,
         }
+    }
+
+    fn set_view(&mut self, view: View) {
+        if self.view != view {
+            self.selected.clear();
+            self.anchor = None;
+        }
+        self.view = view;
+    }
+
+    /// No dialog open, no text being typed: the window's own shortcuts may act.
+    fn idle(&self, ctx: &Context) -> bool {
+        self.editor.is_none()
+            && !self.settings
+            && self.confirm.is_none()
+            && self.link.is_none()
+            && self.category_hotkey.is_none()
+            && self.capture.is_none()
+            && ctx.memory(|m| m.focused().is_none())
     }
 
     /// The sounds shown, filtered and sorted again only when the library or the view changed.
@@ -136,7 +207,7 @@ impl App {
             list.retain(|&i| search_key(&sounds[i].title).contains(&q));
         }
         match self.sort {
-            Sort::Added => {}
+            Sort::Manual => {}
             Sort::Title => list
                 .sort_by_cached_key(|&i| (search_key(&sounds[i].title), sounds[i].title.clone())),
             Sort::Plays => list.sort_by_key(|&i| std::cmp::Reverse(sounds[i].plays)),
@@ -199,10 +270,12 @@ impl App {
                         .selected_text(format!("Tri : {}", self.sort.label()))
                         .width(170.0)
                         .show_ui(ui, |ui| {
-                            for s in [Sort::Added, Sort::Title, Sort::Plays] {
+                            for s in [Sort::Manual, Sort::Title, Sort::Plays] {
                                 ui.selectable_value(&mut self.sort, s, s.label());
                             }
-                        });
+                        })
+                        .response
+                        .on_hover_text("« Mon ordre » : glisse un son pour le déplacer");
                     ui.with_layout(Layout::right_to_left(Align::Center), |ui| {
                         if danger(ui, "Tout arrêter")
                             .on_hover_text(self.global_hint(crate::model::GlobalAction::StopAll))
@@ -220,6 +293,14 @@ impl App {
                         }
                         if icon_text(ui, I_ADD, "Ajouter des sons").clicked() {
                             self.pick_and_add();
+                        }
+                        let update = lock(&self.core.update).clone();
+                        if let Some(v) = update
+                            && icon_text(ui, I_UPDATE, &format!("Version {v} disponible"))
+                                .on_hover_text("Ouvre la page de téléchargement")
+                                .clicked()
+                        {
+                            crate::open_url(crate::state::RELEASES);
                         }
                     });
                 });
@@ -265,6 +346,7 @@ impl App {
     fn open_settings(&mut self) {
         self.settings = true;
         self.settings_error = None;
+        self.autostart = crate::autostart::enabled();
         if self.core.read(|l| l.settings.cable_device == Cable::Filter) {
             let core = self.core.clone();
             std::thread::spawn(move || core.refresh_filter());
@@ -328,11 +410,19 @@ impl App {
 
     // ---------- Categories ----------
 
-    fn sidebar(&mut self, ui: &mut Ui, lib: &Library) {
+    fn sidebar(&mut self, ui: &mut Ui, snap: &Snapshot) {
+        let lib = &snap.lib;
         ui.add_space(4.0);
         let favorites = lib.sounds.iter().filter(|s| s.favorite).count();
-        self.category_row(ui, View::All, "Tous les sons", lib.sounds.len(), None);
-        self.category_row(ui, View::Favorites, "Favoris", favorites, None);
+        self.category_row(
+            ui,
+            View::All,
+            "Tous les sons",
+            lib.sounds.len(),
+            None,
+            false,
+        );
+        self.category_row(ui, View::Favorites, "Favoris", favorites, None, false);
         ui.add_space(10.0);
         ui.label(RichText::new("Catégories").color(TEXT_3).size(12.0));
         ui.add_space(2.0);
@@ -341,12 +431,17 @@ impl App {
             .max_height(ui.available_height() - 48.0)
             .show(ui, |ui| {
                 for c in &lib.categories {
+                    let failed = c
+                        .hotkey
+                        .as_ref()
+                        .is_some_and(|h| snap.failed_hotkeys.contains(h));
                     self.category_row(
                         ui,
                         View::Category(c.id.clone()),
                         &c.name,
                         c.sound_ids.len(),
                         Some(c),
+                        failed,
                     );
                 }
             });
@@ -374,10 +469,21 @@ impl App {
         name: &str,
         count: usize,
         category: Option<&Category>,
+        hotkey_failed: bool,
     ) {
         let selected = self.view == view;
-        let (rect, resp) = ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::click());
+        let (rect, mut resp) =
+            ui.allocate_exact_size(vec2(ui.available_width(), 32.0), Sense::click());
         resp.widget_info(|| egui::WidgetInfo::selected(egui::Role::Button, true, selected, name));
+        if let Some(c) = category {
+            resp = resp.on_hover_text("Clic droit : raccourci qui joue un de ses sons au hasard");
+            resp.context_menu(|ui| {
+                if ui.button("Raccourci : un son au hasard…").clicked() {
+                    self.category_hotkey = Some(CategoryHotkey::new(&c.id));
+                    ui.close();
+                }
+            });
+        }
         let remove_rect =
             Rect::from_center_size(pos2(rect.right() - 16.0, rect.center().y), vec2(24.0, 24.0));
         let remove = category.map(|c| {
@@ -403,27 +509,17 @@ impl App {
         if resp.has_focus() {
             p.rect_stroke(rect, RADIUS, Stroke::new(1.5, ACCENT), StrokeKind::Inside);
         }
-        let text_color = if selected { TEXT } else { TEXT_2 };
-        let galley = p.layout(
-            name.to_string(),
-            egui::FontId::proportional(14.0),
-            text_color,
-            rect.width() - 60.0,
-        );
-        p.galley(
-            pos2(rect.left() + 12.0, rect.center().y - galley.size().y / 2.0),
-            galley,
-            text_color,
-        );
+        // From the right: the count (or the remove button), the hotkey, the name.
         let show_remove = hovered && remove.is_some();
-        if !show_remove {
+        let mut right = if !show_remove {
             p.text(
                 pos2(rect.right() - 10.0, rect.center().y),
                 Align2::RIGHT_CENTER,
                 count.to_string(),
                 egui::FontId::proportional(12.0),
                 TEXT_3,
-            );
+            )
+            .left()
         } else {
             let r = remove.as_ref().unwrap();
             if r.hovered() {
@@ -436,7 +532,30 @@ impl App {
                 icon_font(10.0),
                 if r.hovered() { DANGER } else { TEXT_2 },
             );
+            remove_rect.left()
+        };
+        if let Some(key) = category.and_then(|c| c.hotkey.as_deref()) {
+            let chip = key_chip(
+                ui,
+                right - 6.0,
+                rect.center().y,
+                &keys::format_accelerator(key),
+                hotkey_failed,
+            );
+            right = chip.left();
         }
+        let text_color = if selected { TEXT } else { TEXT_2 };
+        let galley = ui.painter().layout(
+            name.to_string(),
+            egui::FontId::proportional(14.0),
+            text_color,
+            right - rect.left() - 18.0,
+        );
+        ui.painter().galley(
+            pos2(rect.left() + 12.0, rect.center().y - galley.size().y / 2.0),
+            galley,
+            text_color,
+        );
         if let (Some(r), Some(c)) = (&remove, category)
             && r.clicked()
         {
@@ -445,7 +564,7 @@ impl App {
                 name: c.name.clone(),
             });
         } else if resp.clicked() {
-            self.view = view;
+            self.set_view(view);
         }
     }
 
@@ -466,6 +585,7 @@ impl App {
                     id: crate::model::new_id(),
                     name,
                     sound_ids: Vec::new(),
+                    hotkey: None,
                 };
                 let id = c.id.clone();
                 lib.categories.push(c);
@@ -473,7 +593,7 @@ impl App {
             }
         });
         self.core.save_now();
-        self.view = View::Category(id);
+        self.set_view(View::Category(id));
         self.new_category.clear();
     }
 
@@ -482,6 +602,9 @@ impl App {
     fn grid(&mut self, ui: &mut Ui, snap: &Snapshot, voices: &[VoiceInfo]) {
         let lib = &snap.lib;
         self.refresh_visible(lib);
+        if !self.selected.is_empty() {
+            self.selection_bar(ui, lib);
+        }
         if self.visible.is_empty() {
             self.empty_state(ui, lib);
             return;
@@ -508,10 +631,25 @@ impl App {
         let cols = (((width + GAP) / (176.0 + GAP)).floor() as usize).max(1);
         let pad_w = (width - GAP * (cols - 1) as f32) / cols as f32;
         let rows = list.len().div_ceil(cols);
+        // Sounds move by dragging only where the grid shows their own order, all of them.
+        let draggable = self.sort == Sort::Manual && self.query.trim().is_empty();
+        let pointer = ui.input(|i| i.pointer.interact_pos());
+        let mut target = None;
         ui.spacing_mut().item_spacing.y = GAP;
         ScrollArea::vertical()
             .auto_shrink(false)
             .show_rows(ui, PAD_HEIGHT, rows, |ui, range| {
+                // Held near the top or bottom edge, a dragged sound scrolls the grid.
+                if self.drag.is_some()
+                    && let Some(p) = pointer
+                {
+                    let clip = ui.clip_rect();
+                    if p.y < clip.top() + 40.0 {
+                        ui.scroll_with_delta(vec2(0.0, 12.0));
+                    } else if p.y > clip.bottom() - 40.0 {
+                        ui.scroll_with_delta(vec2(0.0, -12.0));
+                    }
+                }
                 for row in range {
                     let (row_rect, _) =
                         ui.allocate_exact_size(vec2(width, PAD_HEIGHT), Sense::hover());
@@ -531,25 +669,215 @@ impl App {
                                 .is_some_and(|h| failed.contains(h)),
                             favorite: sound.favorite,
                             missing: missing.contains(&sound.id),
+                            selected: self.selected.contains(&sound.id),
                             playing,
                             progress: (playing > 0)
                                 .then(|| progress.get(sound.id.as_str()).copied().unwrap_or(0.0)),
                         };
-                        let (action, resp) = pad(ui, rect, Id::unique(("pad", &sound.id)), &view);
+                        let (action, resp) =
+                            pad(ui, rect, Id::unique(("pad", &sound.id)), &view, draggable);
                         // Decoded on hover, so the click plays at once.
                         if resp.hovered() && !view.missing && self.warm.insert(sound.id.clone()) {
                             self.core.engine.preload(&sound.path);
                         }
-                        match action {
-                            PadAction::Play => self.core.trigger(&sound.id),
-                            PadAction::Edit => {
-                                self.editor = Some(Editor::open(sound, lib, view.missing))
+                        if draggable && resp.drag_started() {
+                            self.drag = Some(Drag {
+                                id: sound.id.clone(),
+                                title: sound.title.clone(),
+                                target: None,
+                            });
+                        }
+                        if let Some(drag) = &self.drag {
+                            if drag.id == sound.id {
+                                ui.painter()
+                                    .rect_filled(rect, RADIUS, BG.gamma_multiply(0.6));
+                            } else if let Some(p) = pointer
+                                && rect.expand(GAP / 2.0).contains(p)
+                            {
+                                let after = p.x > rect.center().x;
+                                let x = if after {
+                                    rect.right() + GAP / 2.0
+                                } else {
+                                    rect.left() - GAP / 2.0
+                                };
+                                ui.painter()
+                                    .vline(x, rect.y_range(), Stroke::new(3.0, ACCENT));
+                                target = Some((sound.id.clone(), after));
                             }
+                        }
+                        match action {
+                            PadAction::Play => {
+                                let modifiers = ui.input(|i| i.modifiers);
+                                self.click_pad(modifiers, &sound.id, &list);
+                            }
+                            PadAction::Edit => self.editor = Some(Editor::open(sound, lib)),
                             PadAction::None => {}
                         }
                     }
                 }
             });
+        if let Some(drag) = &mut self.drag {
+            drag.target = target;
+        }
+        self.end_drag(ui.ctx());
+    }
+
+    /// A click on a sound plays it. With Ctrl, it goes into the selection or out of it; with
+    /// Shift, every sound from the last one clicked to this one is selected.
+    fn click_pad(&mut self, modifiers: Modifiers, id: &str, list: &[&Sound]) {
+        if modifiers.command {
+            if !self.selected.remove(id) {
+                self.selected.insert(id.to_string());
+            }
+            self.anchor = Some(id.to_string());
+        } else if modifiers.shift {
+            let at = |x: &str| list.iter().position(|s| s.id == x);
+            let end = at(id);
+            let start = self.anchor.as_deref().and_then(at).or(end);
+            if let (Some(a), Some(b)) = (start, end) {
+                for s in &list[a.min(b)..=a.max(b)] {
+                    self.selected.insert(s.id.clone());
+                }
+            }
+            if self.anchor.is_none() {
+                self.anchor = Some(id.to_string());
+            }
+        } else {
+            self.core.trigger(id);
+        }
+    }
+
+    /// The dragged sound follows the pointer; released, it takes its new place.
+    fn end_drag(&mut self, ctx: &Context) {
+        let Some(drag) = &self.drag else { return };
+        if ctx.input(|i| i.pointer.any_down()) {
+            ctx.set_cursor_icon(CursorIcon::Grabbing);
+            if let Some(p) = ctx.input(|i| i.pointer.interact_pos()) {
+                egui::Area::new(Id::unique("drag"))
+                    .fixed_pos(p + vec2(14.0, 10.0))
+                    .order(egui::Order::Tooltip)
+                    .interactable(false)
+                    .show(ctx, |ui| {
+                        Frame::new()
+                            .fill(SURFACE_3)
+                            .stroke(Stroke::new(1.0, ACCENT))
+                            .corner_radius(RADIUS)
+                            .inner_margin(Margin::symmetric(10, 6))
+                            .show(ui, |ui| ui.label(RichText::new(&drag.title).color(TEXT)));
+                    });
+            }
+            ctx.request_repaint(); // the edge scrolling goes on while the pointer stays still
+            return;
+        }
+        let Some(Drag {
+            id,
+            target: Some((target, after)),
+            ..
+        }) = self.drag.take()
+        else {
+            return;
+        };
+        let view = self.view.clone();
+        self.core.edit(|lib| match &view {
+            View::Category(c) => {
+                if let Some(c) = lib.categories.iter_mut().find(|x| x.id == *c) {
+                    let at = |x: &str| c.sound_ids.iter().position(|s| s == x);
+                    if let (Some(from), Some(to)) = (at(&id), at(&target)) {
+                        reorder(&mut c.sound_ids, from, to, after);
+                    }
+                }
+            }
+            View::All | View::Favorites => {
+                let at = |x: &str| lib.sounds.iter().position(|s| s.id == x);
+                if let (Some(from), Some(to)) = (at(&id), at(&target)) {
+                    reorder(&mut lib.sounds, from, to, after);
+                }
+            }
+        });
+        self.core.save();
+    }
+
+    /// What can be done to the selected sounds at once.
+    fn selection_bar(&mut self, ui: &mut Ui, lib: &Library) {
+        let ids: Vec<String> = lib
+            .sounds
+            .iter()
+            .filter(|s| self.selected.contains(&s.id))
+            .map(|s| s.id.clone())
+            .collect();
+        let n = ids.len();
+        let plural = if n > 1 { "s" } else { "" };
+        ui.horizontal(|ui| {
+            ui.label(
+                RichText::new(format!("{n} son{plural} sélectionné{plural}"))
+                    .family(strong())
+                    .color(TEXT),
+            );
+            ui.add_space(8.0);
+            ui.menu_button("Ajouter à une catégorie", |ui| {
+                if lib.categories.is_empty() {
+                    hint(
+                        ui,
+                        "Aucune catégorie : crée-en une dans la colonne de gauche.",
+                    );
+                }
+                for c in &lib.categories {
+                    if ui.button(&c.name).clicked() {
+                        let category = c.id.clone();
+                        self.core.edit(|lib| {
+                            if let Some(c) = lib.categories.iter_mut().find(|c| c.id == category) {
+                                for id in &ids {
+                                    if !c.sound_ids.contains(id) {
+                                        c.sound_ids.push(id.clone());
+                                    }
+                                }
+                            }
+                        });
+                        self.core.save();
+                        self.core
+                            .toast(format!("Ajouté{plural} à « {} »", c.name), false);
+                        ui.close();
+                    }
+                }
+            });
+            if let View::Category(category) = self.view.clone()
+                && ui.button("Retirer de la catégorie").clicked()
+            {
+                self.core.edit(|lib| {
+                    if let Some(c) = lib.categories.iter_mut().find(|c| c.id == category) {
+                        c.sound_ids.retain(|id| !ids.contains(id));
+                    }
+                });
+                self.core.save();
+                self.selected.clear();
+            }
+            let all_favorite = ids
+                .iter()
+                .all(|id| lib.sound(id).is_some_and(|s| s.favorite));
+            let label = if all_favorite {
+                "Retirer des favoris"
+            } else {
+                "Mettre en favori"
+            };
+            if ui.button(label).clicked() {
+                self.core.edit(|lib| {
+                    for s in lib.sounds.iter_mut().filter(|s| ids.contains(&s.id)) {
+                        s.favorite = !all_favorite;
+                    }
+                });
+                self.core.save();
+            }
+            if danger(ui, "Retirer de la bibliothèque").clicked() {
+                self.confirm = Some(Confirm::RemoveSounds {
+                    label: format!("{n} son{plural}"),
+                    ids: ids.clone(),
+                });
+            }
+            if ui.button("Désélectionner").on_hover_text("Échap").clicked() {
+                self.selected.clear();
+            }
+        });
+        ui.add_space(GAP);
     }
 
     fn empty_state(&mut self, ui: &mut Ui, lib: &Library) {
@@ -960,12 +1288,7 @@ impl App {
 
     /// Ctrl+V on the window (no text field focused) with a link: the link dialog, filled in.
     fn handle_paste(&mut self, ctx: &Context) {
-        let busy = self.link.is_some()
-            || self.editor.is_some()
-            || self.settings
-            || self.confirm.is_some()
-            || self.capture.is_some();
-        if busy || ctx.memory(|m| m.focused().is_some()) {
+        if !self.idle(ctx) {
             return;
         }
         let pasted = ctx.input(|i| {
@@ -1001,6 +1324,33 @@ impl App {
 }
 
 impl eframe::App for App {
+    /// Runs even while the window is hidden in the notification area.
+    fn logic(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
+        if std::mem::take(&mut self.hide_at_start) {
+            ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+        }
+        if self.quitting.load(Ordering::Relaxed) {
+            // Sent again at each frame (each one asks for the next) until the window closes.
+            ctx.send_viewport_cmd(ViewportCommand::Close);
+            return;
+        }
+        let Some(tray) = &self.tray else { return };
+        if ctx.input(|i| i.viewport().close_requested())
+            && self.core.read(|l| l.settings.close_to_tray)
+        {
+            ctx.send_viewport_cmd(ViewportCommand::CancelClose);
+            ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+            if !self.core.read(|l| l.settings.tray_tip_shown) {
+                self.core.edit(|l| l.settings.tray_tip_shown = true);
+                self.core.save();
+                tray.notify(
+                    "Soundpad Improved reste ouvert",
+                    "Tes raccourcis marchent toujours. Clic sur l’icône pour rouvrir la fenêtre, clic droit pour quitter.",
+                );
+            }
+        }
+    }
+
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
         if let Some(result) = self.capture.as_mut().and_then(|c| c.poll(&ctx)) {
@@ -1013,6 +1363,17 @@ impl eframe::App for App {
         {
             self.focus_search = true;
         }
+        if self.idle(&ctx) {
+            if !self.selected.is_empty() && ctx.input(|i| i.key_pressed(Key::Escape)) {
+                self.selected.clear();
+            }
+            if ctx
+                .input_mut(|i| i.consume_shortcut(&KeyboardShortcut::new(Modifiers::CTRL, Key::A)))
+            {
+                let sounds = &self.snap.lib.sounds;
+                self.selected = self.visible.iter().map(|&i| sounds[i].id.clone()).collect();
+            }
+        }
         self.handle_drop(&ctx);
         self.handle_paste(&ctx);
 
@@ -1020,6 +1381,8 @@ impl eframe::App for App {
         if rev != self.rev {
             self.rev = rev;
             self.snap = Arc::new(self.core.snapshot());
+            let ids: HashSet<&String> = self.snap.lib.sounds.iter().map(|s| &s.id).collect();
+            self.selected.retain(|id| ids.contains(id));
         }
         let snap = self.snap.clone();
         let lib = &snap.lib;
@@ -1040,7 +1403,7 @@ impl eframe::App for App {
                 top: 4,
                 bottom: 0,
             }))
-            .show(ui, |ui| self.sidebar(ui, lib));
+            .show(ui, |ui| self.sidebar(ui, &snap));
         Panel::right("playing")
             .resizable(false)
             .exact_size(336.0)
@@ -1061,7 +1424,7 @@ impl eframe::App for App {
             }))
             .show(ui, |ui| self.grid(ui, &snap, &voices));
 
-        self.dialogs(&ctx, lib, &status);
+        self.dialogs(&ctx, &snap, &status);
         self.drop_overlay(&ctx);
         self.toasts_ui(&ctx);
         if !voices.is_empty() || self.meter > 0.0 || self.capture.is_some() {
@@ -1070,6 +1433,9 @@ impl eframe::App for App {
     }
 
     fn on_exit(&mut self, _gl: Option<&eframe::glow::Context>) {
+        if let Some(tray) = &self.tray {
+            tray.remove();
+        }
         self.core.shutdown();
     }
 }
