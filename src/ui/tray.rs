@@ -176,8 +176,8 @@ fn icon() -> Option<HICON> {
     res.extend(32u16.to_le_bytes()); // bits per pixel
     res.extend([0u8; 24]); // no compression, sizes and colors unused
     for row in rgba.chunks_exact(size as usize * 4).rev() {
-        for p in row.chunks_exact(4) {
-            res.extend([p[2], p[1], p[0], p[3]]);
+        for [r, g, b, a] in row.as_chunks::<4>().0 {
+            res.extend([*b, *g, *r, *a]);
         }
     }
     res.extend(vec![0u8; size.div_ceil(32) as usize * 4 * size as usize]);
