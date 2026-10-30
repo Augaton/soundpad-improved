@@ -1,6 +1,6 @@
 [package]
 name = "soundpad-improved"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "Soundboard polyphonique : plusieurs sons à la fois, volume réglable en direct, import de la bibliothèque Soundpad."
 publish = false
