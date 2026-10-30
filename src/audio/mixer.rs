@@ -91,8 +91,7 @@ impl Mixer {
         self.voices.iter_mut().find(|v| v.id == id && !v.stopping)
     }
 
-    pub fn voices(&mut self) -> Vec<VoiceInfo> {
-        self.retired.clear();
+    pub fn voices(&self) -> Vec<VoiceInfo> {
         self.voices
             .iter()
             .filter(|v| !v.stopping)
@@ -130,7 +129,6 @@ impl Mixer {
         if !self.running.iter().any(|&r| r) {
             return Err("aucune sortie audio active".into());
         }
-        self.retired.clear();
         loop {
             let playing: Vec<u64> = self
                 .voices
@@ -165,6 +163,12 @@ impl Mixer {
             cursors,
         });
         Ok(Some(id))
+    }
+
+    /// The sounds of the voices that ended, for the caller to drop once the mixer is unlocked:
+    /// freeing a long sound takes time, which an output callback waiting on the lock has not.
+    pub fn take_retired(&mut self) -> Vec<Arc<Pcm>> {
+        self.retired.drain(..).map(|v| v.pcm).collect()
     }
 
     /// Fades the voice out; it disappears from voices() at once.
@@ -349,6 +353,8 @@ mod tests {
             "stops after the last frame"
         );
         assert!(m.voices().is_empty());
+        assert_eq!(m.take_retired().len(), 1, "its sound, freed by the caller");
+        assert!(m.take_retired().is_empty());
     }
 
     #[test]

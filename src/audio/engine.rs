@@ -240,15 +240,20 @@ impl Engine {
     fn start(&self, req: PlayRequest, decoded: Result<Arc<Pcm>, String>, generation: u64) {
         let started = decoded.and_then(|pcm| {
             let duration = pcm.duration();
-            let id = self.mixer().start(
-                &req.sound_id,
-                &req.title,
-                pcm,
-                req.volume,
-                req.rate,
-                generation,
-            )?;
-            Ok(id.map(|_| duration))
+            let (id, retired) = {
+                let mut m = self.mixer();
+                let id = m.start(
+                    &req.sound_id,
+                    &req.title,
+                    pcm,
+                    req.volume,
+                    req.rate,
+                    generation,
+                );
+                (id, m.take_retired())
+            };
+            drop(retired); // unlocked: see Mixer::take_retired
+            Ok(id?.map(|_| duration))
         });
         match started {
             Ok(Some(duration)) => (self.shared.events)(Event::Started {
@@ -272,7 +277,12 @@ impl Engine {
     }
 
     pub fn voices(&self) -> Vec<VoiceInfo> {
-        self.mixer().voices()
+        let (voices, retired) = {
+            let mut m = self.mixer();
+            (m.voices(), m.take_retired())
+        };
+        drop(retired); // unlocked: see Mixer::take_retired
+        voices
     }
 
     pub fn stop(&self, id: u64) {

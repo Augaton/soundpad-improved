@@ -87,6 +87,7 @@ pub struct App {
     meter: f32,
     seeking: HashMap<u64, f32>, // voice id -> position (0..1) while its bar is dragged
     warm: HashSet<String>,      // sounds already decoded ahead on hover
+    hover: Option<(String, f64)>, // the sound under the pointer, since when (egui time)
     selected: HashSet<String>,  // sound ids, picked with Ctrl or Shift + click
     anchor: Option<String>,     // where a Shift + click range starts
     drag: Option<Drag>,
@@ -98,19 +99,25 @@ pub struct App {
     tray: Option<tray::Tray>,
     quitting: Arc<AtomicBool>, // "Quitter" in the icon's menu: the window closes for real
     hide_at_start: bool,       // launched with Windows: straight to the notification area
+    // In the notification area. eframe still runs the window's frames then (winit reports no
+    // occlusion on Windows): nothing is built or drawn.
+    hidden: Arc<AtomicBool>,
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>, core: Arc<Core>, hidden: bool) -> App {
+    pub fn new(cc: &eframe::CreationContext<'_>, core: Arc<Core>, start_hidden: bool) -> App {
         theme::install(&cc.egui_ctx);
         theme::dark_title_bar(cc);
         core.start(cc.egui_ctx.clone());
         let snap = Arc::new(core.snapshot());
         let quitting = Arc::new(AtomicBool::new(false));
+        let hidden = Arc::new(AtomicBool::new(false));
         let tray = {
-            let (ctx, core, quitting) = (cc.egui_ctx.clone(), core.clone(), quitting.clone());
+            let (ctx, core) = (cc.egui_ctx.clone(), core.clone());
+            let (quitting, hidden) = (quitting.clone(), hidden.clone());
             tray::start(move |command| match command {
                 tray::Command::Show => {
+                    hidden.store(false, Ordering::Relaxed);
                     ctx.send_viewport_cmd(ViewportCommand::Visible(true));
                     ctx.send_viewport_cmd(ViewportCommand::Minimized(false));
                     ctx.send_viewport_cmd(ViewportCommand::Focus);
@@ -142,6 +149,7 @@ impl App {
             meter: 0.0,
             seeking: HashMap::new(),
             warm: HashSet::new(),
+            hover: None,
             selected: HashSet::new(),
             anchor: None,
             drag: None,
@@ -150,10 +158,16 @@ impl App {
             rev: u64::MAX,
             visible: Vec::new(),
             visible_for: None,
-            hide_at_start: hidden && tray.is_some(),
+            hide_at_start: start_hidden && tray.is_some(),
             tray,
             quitting,
+            hidden,
         }
+    }
+
+    fn hide(&self, ctx: &Context) {
+        self.hidden.store(true, Ordering::Relaxed);
+        ctx.send_viewport_cmd(ViewportCommand::Visible(false));
     }
 
     fn set_view(&mut self, view: View) {
@@ -635,6 +649,7 @@ impl App {
         let draggable = self.sort == Sort::Manual && self.query.trim().is_empty();
         let pointer = ui.input(|i| i.pointer.interact_pos());
         let mut target = None;
+        let mut hovered = false;
         ui.spacing_mut().item_spacing.y = GAP;
         ScrollArea::vertical()
             .auto_shrink(false)
@@ -676,9 +691,9 @@ impl App {
                         };
                         let (action, resp) =
                             pad(ui, rect, Id::unique(("pad", &sound.id)), &view, draggable);
-                        // Decoded on hover, so the click plays at once.
-                        if resp.hovered() && !view.missing && self.warm.insert(sound.id.clone()) {
-                            self.core.engine.preload(&sound.path);
+                        if resp.hovered() && !view.missing {
+                            hovered = true;
+                            self.warm_up(ui.ctx(), sound);
                         }
                         if draggable && resp.drag_started() {
                             self.drag = Some(Drag {
@@ -716,10 +731,31 @@ impl App {
                     }
                 }
             });
+        if !hovered {
+            self.hover = None;
+        }
         if let Some(drag) = &mut self.drag {
             drag.target = target;
         }
         self.end_drag(ui.ctx());
+    }
+
+    /// A sound the pointer rests on is decoded ahead, so the click plays at once. Not one it
+    /// only passes over: scrolling the grid would decode the whole library.
+    fn warm_up(&mut self, ctx: &Context, sound: &Sound) {
+        const REST: f64 = 0.15; // seconds
+        let now = ctx.input(|i| i.time);
+        match &self.hover {
+            Some((id, since)) if *id == sound.id => {
+                if now - since >= REST && self.warm.insert(sound.id.clone()) {
+                    self.core.engine.preload(&sound.path);
+                }
+            }
+            _ => {
+                self.hover = Some((sound.id.clone(), now));
+                ctx.request_repaint_after(Duration::from_secs_f64(REST));
+            }
+        }
     }
 
     /// A click on a sound plays it. With Ctrl, it goes into the selection or out of it; with
@@ -798,14 +834,13 @@ impl App {
     }
 
     /// What can be done to the selected sounds at once.
+    /// Drawn at every frame: one pass over the library, the selection looked up in its set.
     fn selection_bar(&mut self, ui: &mut Ui, lib: &Library) {
-        let ids: Vec<String> = lib
-            .sounds
-            .iter()
-            .filter(|s| self.selected.contains(&s.id))
-            .map(|s| s.id.clone())
-            .collect();
-        let n = ids.len();
+        let (mut n, mut all_favorite) = (0, true);
+        for s in lib.sounds.iter().filter(|s| self.selected.contains(&s.id)) {
+            n += 1;
+            all_favorite &= s.favorite;
+        }
         let plural = if n > 1 { "s" } else { "" };
         ui.horizontal(|ui| {
             ui.label(
@@ -824,13 +859,19 @@ impl App {
                 for c in &lib.categories {
                     if ui.button(&c.name).clicked() {
                         let category = c.id.clone();
+                        let selected = &self.selected;
                         self.core.edit(|lib| {
+                            let ids: Vec<String> = lib
+                                .sounds
+                                .iter()
+                                .filter(|s| selected.contains(&s.id))
+                                .map(|s| s.id.clone())
+                                .collect();
                             if let Some(c) = lib.categories.iter_mut().find(|c| c.id == category) {
-                                for id in &ids {
-                                    if !c.sound_ids.contains(id) {
-                                        c.sound_ids.push(id.clone());
-                                    }
-                                }
+                                let present: HashSet<String> =
+                                    c.sound_ids.iter().cloned().collect();
+                                c.sound_ids
+                                    .extend(ids.into_iter().filter(|id| !present.contains(id)));
                             }
                         });
                         self.core.save();
@@ -843,25 +884,24 @@ impl App {
             if let View::Category(category) = self.view.clone()
                 && ui.button("Retirer de la catégorie").clicked()
             {
+                let selected = &self.selected;
                 self.core.edit(|lib| {
                     if let Some(c) = lib.categories.iter_mut().find(|c| c.id == category) {
-                        c.sound_ids.retain(|id| !ids.contains(id));
+                        c.sound_ids.retain(|id| !selected.contains(id));
                     }
                 });
                 self.core.save();
                 self.selected.clear();
             }
-            let all_favorite = ids
-                .iter()
-                .all(|id| lib.sound(id).is_some_and(|s| s.favorite));
             let label = if all_favorite {
                 "Retirer des favoris"
             } else {
                 "Mettre en favori"
             };
             if ui.button(label).clicked() {
+                let selected = &self.selected;
                 self.core.edit(|lib| {
-                    for s in lib.sounds.iter_mut().filter(|s| ids.contains(&s.id)) {
+                    for s in lib.sounds.iter_mut().filter(|s| selected.contains(&s.id)) {
                         s.favorite = !all_favorite;
                     }
                 });
@@ -870,7 +910,7 @@ impl App {
             if danger(ui, "Retirer de la bibliothèque").clicked() {
                 self.confirm = Some(Confirm::RemoveSounds {
                     label: format!("{n} son{plural}"),
-                    ids: ids.clone(),
+                    ids: self.selected.iter().cloned().collect(),
                 });
             }
             if ui.button("Désélectionner").on_hover_text("Échap").clicked() {
@@ -1327,7 +1367,7 @@ impl eframe::App for App {
     /// Runs even while the window is hidden in the notification area.
     fn logic(&mut self, ctx: &Context, _frame: &mut eframe::Frame) {
         if std::mem::take(&mut self.hide_at_start) {
-            ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+            self.hide(ctx);
         }
         if self.quitting.load(Ordering::Relaxed) {
             // Sent again at each frame (each one asks for the next) until the window closes.
@@ -1339,7 +1379,7 @@ impl eframe::App for App {
             && self.core.read(|l| l.settings.close_to_tray)
         {
             ctx.send_viewport_cmd(ViewportCommand::CancelClose);
-            ctx.send_viewport_cmd(ViewportCommand::Visible(false));
+            self.hide(ctx);
             if !self.core.read(|l| l.settings.tray_tip_shown) {
                 self.core.edit(|l| l.settings.tray_tip_shown = true);
                 self.core.save();
@@ -1352,6 +1392,9 @@ impl eframe::App for App {
     }
 
     fn ui(&mut self, ui: &mut Ui, _frame: &mut eframe::Frame) {
+        if self.hidden.load(Ordering::Relaxed) {
+            return; // shown again, the next frame builds everything
+        }
         let ctx = ui.ctx().clone();
         if let Some(result) = self.capture.as_mut().and_then(|c| c.poll(&ctx)) {
             self.finish_capture(result);

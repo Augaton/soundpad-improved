@@ -59,7 +59,7 @@ pub struct Core {
     pub filter: Mutex<FilterState>,
     pub soundpad_count: Mutex<usize>, // sounds in Soundpad's list, shown while the library is empty
     pub update: Mutex<Option<String>>, // a newer version published on GitHub
-    last_random: Mutex<HashMap<String, String>>, // category id -> sound its hotkey played last
+    next_random: Mutex<HashMap<String, String>>, // category id -> its hotkey's next sound, decoded ahead
     toasts: Mutex<Vec<Toast>>,
     hotkeys: OnceLock<Hotkeys<Action>>,
     saves: Mutex<Option<Sender<()>>>,
@@ -91,7 +91,7 @@ impl Core {
                 filter: Mutex::default(),
                 soundpad_count: Mutex::new(0),
                 update: Mutex::default(),
-                last_random: Mutex::default(),
+                next_random: Mutex::default(),
                 toasts: Mutex::default(),
                 hotkeys: OnceLock::new(),
                 saves: Mutex::new(None),
@@ -225,35 +225,56 @@ impl Core {
         self.play(&sound, mode, exclusive);
     }
 
-    /// One of the category's sounds at random, never the same twice in a row.
-    fn play_random(&self, category: &str) {
+    /// The sounds a category's hotkey may play, as (id, path): those whose file is there.
+    fn random_candidates(&self, category: &str) -> Vec<(String, String)> {
         let missing = lock(&self.missing).clone();
-        let ids: Vec<String> = self.read(|l| {
-            l.categories
+        self.read(|l| {
+            let Some(c) = l.categories.iter().find(|c| c.id == category) else {
+                return Vec::new();
+            };
+            let members: HashSet<&String> = c.sound_ids.iter().collect();
+            l.sounds
                 .iter()
-                .find(|c| c.id == category)
-                .map(|c| {
-                    c.sound_ids
-                        .iter()
-                        .filter(|id| !missing.contains(*id))
-                        .cloned()
-                        .collect()
-                })
-                .unwrap_or_default()
-        });
-        let ids: Vec<&str> = ids.iter().map(String::as_str).collect();
+                .filter(|s| members.contains(&s.id) && !missing.contains(&s.id))
+                .map(|s| (s.id.clone(), s.path.clone()))
+                .collect()
+        })
+    }
+
+    /// Picks the category's next sound now, and decodes it: the hotkey plays at once without
+    /// decoding the whole category ahead.
+    fn plan_random(&self, category: &str, candidates: &[(String, String)], last: Option<&str>) {
+        let ids: Vec<&str> = candidates.iter().map(|(id, _)| id.as_str()).collect();
         let seed = RandomState::new().hash_one(Instant::now());
-        let picked = {
-            let mut last = lock(&self.last_random);
-            let picked = pick_random(&ids, last.get(category).map(String::as_str), seed);
-            if let Some(id) = picked {
-                last.insert(category.to_string(), id.to_string());
-            }
-            picked
+        let Some(i) =
+            pick_random(&ids, last, seed).and_then(|id| ids.iter().position(|x| *x == id))
+        else {
+            return;
         };
-        if let Some(id) = picked {
-            self.trigger(id);
-        }
+        self.engine.preload(&candidates[i].1);
+        lock(&self.next_random).insert(category.to_string(), candidates[i].0.clone());
+    }
+
+    /// A category's hotkey: the sound picked in advance, then the next one is picked, never the
+    /// same twice in a row.
+    fn play_random(&self, category: &str) {
+        let candidates = self.random_candidates(category);
+        let planned = lock(&self.next_random)
+            .remove(category)
+            .filter(|id| candidates.iter().any(|(x, _)| x == id));
+        let id = match planned {
+            Some(id) => id,
+            None => {
+                let ids: Vec<&str> = candidates.iter().map(|(id, _)| id.as_str()).collect();
+                let seed = RandomState::new().hash_one(Instant::now());
+                let Some(id) = pick_random(&ids, None, seed) else {
+                    return;
+                };
+                id.to_string()
+            }
+        };
+        self.trigger(&id);
+        self.plan_random(category, &candidates, Some(&id));
     }
 
     /// The editor's "Listen": the settings being edited, from the start.
@@ -500,27 +521,29 @@ impl Core {
         self.repaint();
     }
 
-    /// Sounds bound to a hotkey, their own or their category's, are played blind, in game:
-    /// decoded ahead of time.
+    /// Sounds bound to a hotkey are played blind, in game: decoded ahead of time. For a
+    /// category's hotkey, only the sound it plays next.
     pub fn preload_hotkey_sounds(&self) {
         let missing = lock(&self.missing).clone();
-        let paths: Vec<String> = self.read(|l| {
-            let random: HashSet<&String> = l
-                .categories
-                .iter()
-                .filter(|c| c.hotkey.is_some())
-                .flat_map(|c| &c.sound_ids)
-                .collect();
-            l.sounds
-                .iter()
-                .filter(|s| {
-                    (s.hotkey.is_some() || random.contains(&s.id)) && !missing.contains(&s.id)
-                })
-                .map(|s| s.path.clone())
-                .collect()
+        let (paths, categories): (Vec<String>, Vec<String>) = self.read(|l| {
+            (
+                l.sounds
+                    .iter()
+                    .filter(|s| s.hotkey.is_some() && !missing.contains(&s.id))
+                    .map(|s| s.path.clone())
+                    .collect(),
+                l.categories
+                    .iter()
+                    .filter(|c| c.hotkey.is_some())
+                    .map(|c| c.id.clone())
+                    .collect(),
+            )
         });
         for p in paths {
             self.engine.preload(&p);
+        }
+        for c in categories {
+            self.plan_random(&c, &self.random_candidates(&c), None);
         }
     }
 
