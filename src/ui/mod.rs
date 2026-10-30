@@ -1384,7 +1384,7 @@ impl eframe::App for App {
                 self.core.edit(|l| l.settings.tray_tip_shown = true);
                 self.core.save();
                 tray.notify(
-                    "Soundpad Improved reste ouvert",
+                    "Bruitage reste ouvert",
                     "Tes raccourcis marchent toujours. Clic sur l’icône pour rouvrir la fenêtre, clic droit pour quitter.",
                 );
             }

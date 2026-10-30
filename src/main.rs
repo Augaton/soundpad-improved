@@ -1,4 +1,4 @@
-// Soundpad Improved: a polyphonic soundboard for Windows.
+// Bruitage: a polyphonic soundboard for Windows, formerly Soundpad Improved.
 #![cfg_attr(not(debug_assertions), windows_subsystem = "windows")]
 
 mod audio;
@@ -14,15 +14,16 @@ mod store;
 mod ui;
 
 use eframe::egui;
-use windows::Win32::Foundation::{ERROR_ALREADY_EXISTS, GetLastError};
-use windows::Win32::System::Threading::CreateMutexW;
+use windows::Win32::Foundation::{CloseHandle, ERROR_ALREADY_EXISTS, GetLastError};
+use windows::Win32::System::Threading::{CreateMutexW, OpenMutexW, SYNCHRONIZATION_SYNCHRONIZE};
 use windows::Win32::UI::Shell::ShellExecuteW;
 use windows::Win32::UI::WindowsAndMessaging::{
-    FindWindowW, IsIconic, SW_RESTORE, SW_SHOWNORMAL, SetForegroundWindow, ShowWindow,
+    FindWindowW, IsIconic, MB_ICONINFORMATION, MB_OK, MessageBoxW, SW_RESTORE, SW_SHOWNORMAL,
+    SetForegroundWindow, ShowWindow,
 };
 use windows::core::{PCWSTR, w};
 
-const TITLE: &str = "Soundpad Improved";
+const TITLE: &str = "Bruitage";
 
 pub fn open_url(url: &str) {
     let url: Vec<u16> = url.encode_utf16().chain([0]).collect();
@@ -42,7 +43,7 @@ pub fn open_url(url: &str) {
 /// through its notification-area icon (the window may be hidden there).
 /// A test profile (SPI_USER_DATA) runs beside the everyday one.
 fn already_running() -> bool {
-    let mut name = "Local\\SoundpadImprovedInstance".to_string();
+    let mut name = "Local\\BruitageInstance".to_string();
     if let Some(dir) = std::env::var_os("SPI_USER_DATA") {
         use std::hash::{BuildHasher, BuildHasherDefault};
         let hash = BuildHasherDefault::<std::collections::hash_map::DefaultHasher>::default()
@@ -58,7 +59,7 @@ fn already_running() -> bool {
     if ui::wake_running() {
         return true;
     }
-    if let Ok(hwnd) = unsafe { FindWindowW(None, w!("Soundpad Improved")) } {
+    if let Ok(hwnd) = unsafe { FindWindowW(None, w!("Bruitage")) } {
         unsafe {
             if IsIconic(hwnd).as_bool() {
                 let _ = ShowWindow(hwnd, SW_RESTORE);
@@ -69,8 +70,37 @@ fn already_running() -> bool {
     true
 }
 
+/// The app under its former name, Soundpad Improved, still running (in the notification area
+/// since 0.3): it would hold the hotkeys and keep writing its library, which moves now.
+fn former_running() -> bool {
+    if std::env::var_os("SPI_USER_DATA").is_some() {
+        return false;
+    }
+    let Ok(mutex) = (unsafe {
+        OpenMutexW(
+            SYNCHRONIZATION_SYNCHRONIZE,
+            false,
+            w!("Local\\SoundpadImprovedInstance"),
+        )
+    }) else {
+        return false;
+    };
+    let _ = unsafe { CloseHandle(mutex) };
+    unsafe {
+        MessageBoxW(
+            None,
+            w!(
+                "Soundpad Improved, l’ancien nom de Bruitage, est encore ouvert, peut-être dans la zone de notification. Quitte-le (clic droit sur son icône, « Quitter »), puis relance Bruitage : il reprendra ta bibliothèque."
+            ),
+            w!("Bruitage"),
+            MB_OK | MB_ICONINFORMATION,
+        );
+    }
+    true
+}
+
 fn main() -> eframe::Result {
-    if already_running() {
+    if former_running() || already_running() {
         return Ok(());
     }
     let hidden = std::env::args().any(|a| a == autostart::HIDDEN);

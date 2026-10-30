@@ -7,7 +7,8 @@ use windows::Win32::System::Registry::{
 use windows::core::{PCWSTR, w};
 
 const RUN: PCWSTR = w!("Software\\Microsoft\\Windows\\CurrentVersion\\Run");
-const NAME: PCWSTR = w!("Soundpad Improved");
+const NAME: PCWSTR = w!("Bruitage");
+const FORMER_NAME: PCWSTR = w!("Soundpad Improved"); // the app's name before 0.4
 /// On the command line: start hidden in the notification area.
 pub const HIDDEN: &str = "--tray";
 
@@ -16,14 +17,14 @@ fn command() -> Option<String> {
     Some(format!("\"{}\" {HIDDEN}", exe.display()))
 }
 
-fn registered() -> Option<String> {
+fn registered(name: PCWSTR) -> Option<String> {
     let mut buf = [0u16; 1024];
     let mut size = size_of_val(&buf) as u32;
     unsafe {
         RegGetValueW(
             HKEY_CURRENT_USER,
             RUN,
-            NAME,
+            name,
             RRF_RT_REG_SZ,
             None,
             Some(buf.as_mut_ptr().cast()),
@@ -37,7 +38,7 @@ fn registered() -> Option<String> {
 }
 
 pub fn enabled() -> bool {
-    registered().is_some()
+    registered(NAME).is_some()
 }
 
 pub fn set(on: bool) -> Result<(), String> {
@@ -64,9 +65,14 @@ pub fn set(on: bool) -> Result<(), String> {
 }
 
 /// The exe is portable, and each version is a new file: the entry follows the one that runs.
+/// An entry under the app's former name becomes one under its name.
 pub fn follow_exe() {
-    if let (Some(registered), Some(current)) = (registered(), command())
-        && registered != current
+    let former = registered(FORMER_NAME).is_some();
+    if former {
+        let _ = unsafe { RegDeleteKeyValueW(HKEY_CURRENT_USER, RUN, FORMER_NAME) };
+    }
+    if let Some(current) = command()
+        && (former || registered(NAME).is_some_and(|r| r != current))
     {
         let _ = set(true);
     }

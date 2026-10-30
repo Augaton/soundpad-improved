@@ -1,0 +1,83 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1200 450" width="1200" height="450" role="img" aria-labelledby="t d">
+  <title id="t">Comment Bruitage envoie tes sons aux autres</title>
+  <desc id="d">Un raccourci clavier, même en jeu, déclenche un son dans Bruitage, qui mélange tous les sons en cours. Tu les entends dans ton casque. Le filtre Bruitage les ajoute à ta voix dans ton vrai micro, et Discord, les jeux ou OBS entendent ta voix et les sons sans aucun réglage.</desc>
+  <style>
+    text { font-family: "Segoe UI", system-ui, -apple-system, "Helvetica Neue", Arial, sans-serif; fill: #e6e8eb; }
+    .title { font-size: 16px; font-weight: 600; }
+    .sub { font-size: 13px; fill: #8d959e; }
+    .accent { fill: #e0a046; }
+    .node { fill: #22262b; stroke: #464d55; stroke-width: 1.5; }
+    .main { stroke: #e0a046; stroke-width: 2; }
+    .line { fill: none; stroke: #464d55; stroke-width: 2; }
+    .flow { fill: none; stroke: #e0a046; stroke-width: 4; stroke-linecap: round; stroke-dasharray: 0.1 15; animation: flow 0.8s linear infinite; }
+    .voice { stroke: #b0b6bd; }
+    .key { animation: press 2.4s ease-in-out infinite; }
+    @keyframes flow { from { stroke-dashoffset: 15.1; } to { stroke-dashoffset: 0; } }
+    @keyframes press { 0%, 12%, 100% { transform: translateY(0); } 5% { transform: translateY(3px); } }
+    @media (prefers-reduced-motion: reduce) { .flow, .key { animation: none; } }
+  </style>
+  <defs>
+    <marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+      <path d="M0 0 L10 5 L0 10 z" fill="#464d55"/>
+    </marker>
+  </defs>
+  <rect width="1200" height="450" rx="16" fill="#15171a"/>
+
+  <!-- Connections: a grey line, and the sound travelling along it. -->
+  <path class="line" d="M230 230 L306 230" marker-end="url(#arrow)"/>
+  <path class="line" d="M540 205 C 590 205, 590 100, 636 100" marker-end="url(#arrow)"/>
+  <path class="line" d="M540 255 C 590 255, 590 300, 636 300" marker-end="url(#arrow)"/>
+  <path class="line" d="M520 390 C 585 390, 585 335, 636 335" marker-end="url(#arrow)"/>
+  <path class="line" d="M870 310 L956 310" marker-end="url(#arrow)"/>
+  <path class="flow" d="M230 230 L300 230"/>
+  <path class="flow" d="M540 205 C 590 205, 590 100, 630 100"/>
+  <path class="flow" d="M540 255 C 590 255, 590 300, 630 300"/>
+  <path class="flow voice" d="M520 390 C 585 390, 585 335, 630 335"/>
+  <path class="flow" d="M870 310 L950 310"/>
+
+  <!-- The hotkey -->
+  <rect class="node" x="40" y="175" width="190" height="110" rx="10"/>
+  <g class="key">
+    <rect x="95" y="193" width="80" height="40" rx="7" fill="#2b3036" stroke="#464d55" stroke-width="1.5"/>
+    <text x="135" y="219" text-anchor="middle" style="font-size: 15px; font-weight: 600;">Num 1</text>
+  </g>
+  <text class="title" x="135" y="259" text-anchor="middle">Un raccourci</text>
+  <text class="sub" x="135" y="277" text-anchor="middle">même en plein jeu</text>
+
+  <!-- Bruitage -->
+  <rect class="node main" x="310" y="155" width="230" height="150" rx="12"/>
+  <rect x="410" y="172" width="30" height="30" rx="7" fill="#e0a046"/>
+  <rect x="415" y="181" width="4" height="12" fill="#1c1407"/>
+  <rect x="423" y="177" width="4" height="20" fill="#1c1407"/>
+  <rect x="431" y="181" width="4" height="12" fill="#1c1407"/>
+  <text x="425" y="234" text-anchor="middle" style="font-size: 20px; font-weight: 700;">Bruitage</text>
+  <text class="sub" x="425" y="257" text-anchor="middle">mélange les sons en cours,</text>
+  <text class="sub" x="425" y="275" text-anchor="middle">plusieurs à la fois</text>
+
+  <!-- Your voice -->
+  <rect class="node" x="330" y="355" width="190" height="70" rx="10"/>
+  <text class="title" x="425" y="386" text-anchor="middle">Ta voix</text>
+  <text class="sub" x="425" y="406" text-anchor="middle">dans ton micro</text>
+
+  <!-- Headset -->
+  <rect class="node" x="640" y="50" width="230" height="100" rx="10"/>
+  <text class="title" x="755" y="94" text-anchor="middle">Ton casque</text>
+  <text class="sub" x="755" y="117" text-anchor="middle">tu entends les sons</text>
+
+  <!-- Microphone and filter -->
+  <rect class="node" x="640" y="250" width="230" height="125" rx="10"/>
+  <text class="title" x="755" y="285" text-anchor="middle">Ton vrai micro</text>
+  <text class="accent" x="755" y="307" text-anchor="middle" style="font-size: 14px; font-weight: 600;">+ le filtre Bruitage</text>
+  <text class="sub" x="755" y="333" text-anchor="middle">Windows y ajoute les sons</text>
+  <text class="sub" x="755" y="351" text-anchor="middle">à ta voix</text>
+
+  <!-- The others -->
+  <rect class="node" x="960" y="250" width="200" height="125" rx="10"/>
+  <text class="title" x="1060" y="287" text-anchor="middle">Discord, jeux, OBS…</text>
+  <text class="sub" x="1060" y="313" text-anchor="middle">entendent ta voix</text>
+  <text class="sub" x="1060" y="331" text-anchor="middle">et les sons,</text>
+  <text class="accent" x="1060" y="353" text-anchor="middle" style="font-size: 13px;">sans aucun réglage</text>
+
+  <text class="sub" x="640" y="410">Sans le filtre : Bruitage joue aussi dans le câble virtuel</text>
+  <text class="sub" x="640" y="428">VB-Cable, que Discord écoute comme un micro.</text>
+</svg>

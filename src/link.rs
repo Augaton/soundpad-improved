@@ -444,7 +444,7 @@ pub fn get(url: &str, max: usize) -> Result<Response, String> {
     let err = |e: windows::core::Error| e.message();
     unsafe {
         let session = opened(WinHttpOpen(
-            w!("SoundpadImproved"),
+            w!("Bruitage"),
             WINHTTP_ACCESS_TYPE_AUTOMATIC_PROXY,
             PCWSTR::null(),
             PCWSTR::null(),

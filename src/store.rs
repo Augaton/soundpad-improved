@@ -2,6 +2,7 @@
 use std::fs;
 use std::io;
 use std::path::{Component, Path, PathBuf, Prefix};
+use std::sync::OnceLock;
 
 use serde_json::Value;
 
@@ -18,12 +19,34 @@ fn app_data() -> PathBuf {
         .unwrap_or_else(std::env::temp_dir)
 }
 
-/// %APPDATA%\soundpad-improved, the folder the Electron version used. SPI_USER_DATA isolates
-/// a test profile.
+/// %APPDATA%\bruitage. The folder of the app's former name, Soundpad Improved (also used by
+/// its Electron version), is moved there once; while something holds it, it is used where it
+/// is. SPI_USER_DATA isolates a test profile.
 pub fn data_dir() -> PathBuf {
-    std::env::var_os("SPI_USER_DATA")
-        .map(PathBuf::from)
-        .unwrap_or_else(|| app_data().join("soundpad-improved"))
+    static DIR: OnceLock<PathBuf> = OnceLock::new();
+    DIR.get_or_init(|| {
+        if let Some(dir) = std::env::var_os("SPI_USER_DATA") {
+            return PathBuf::from(dir);
+        }
+        let (dir, former) = (app_data().join("bruitage"), former_dir());
+        if !dir.exists() && former.exists() && fs::rename(&former, &dir).is_err() {
+            return former;
+        }
+        dir
+    })
+    .clone()
+}
+
+fn former_dir() -> PathBuf {
+    app_data().join("soundpad-improved")
+}
+
+/// `path` under the folder `from` -> the same file under `to`. The folder is compared without
+/// regard to ASCII case, as Windows does.
+fn move_prefix(path: &str, from: &str, to: &str) -> Option<String> {
+    let rest = path.get(from.len()..)?;
+    (path[..from.len()].eq_ignore_ascii_case(from) && rest.starts_with(['\\', '/']))
+        .then(|| format!("{to}{rest}"))
 }
 
 /// Where sounds added from a link are saved.
@@ -73,8 +96,24 @@ pub fn load_library() -> Loaded {
     match serde_json::from_str::<Value>(text.trim_start_matches('\u{feff}')) {
         Ok(v) => {
             let _ = fs::write(file.with_extension("json.bak"), &text);
+            let mut lib = normalize_library(&v);
+            // Sounds saved from a link lived in the former folder, now moved.
+            let (from, to) = (former_dir(), data_dir());
+            if from != to {
+                let (from, to) = (from.to_string_lossy(), to.to_string_lossy());
+                let mut moved = false;
+                for s in &mut lib.sounds {
+                    if let Some(p) = move_prefix(&s.path, &from, &to) {
+                        s.path = p;
+                        moved = true;
+                    }
+                }
+                if moved {
+                    let _ = save_library(&lib);
+                }
+            }
             Loaded {
-                lib: normalize_library(&v),
+                lib,
                 warning: None,
                 writable: true,
             }
@@ -167,6 +206,21 @@ pub fn expand_paths(paths: &[PathBuf]) -> Vec<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn move_prefix_follows_the_renamed_folder() {
+        let (from, to) = (r"C:\Users\a\soundpad-improved", r"C:\Users\a\bruitage");
+        assert_eq!(
+            move_prefix(r"C:\USERS\a\Soundpad-Improved\sons\x.mp3", from, to).as_deref(),
+            Some(r"C:\Users\a\bruitage\sons\x.mp3")
+        );
+        assert_eq!(
+            move_prefix(r"C:\Users\a\soundpad-improved2\x.mp3", from, to),
+            None
+        );
+        assert_eq!(move_prefix(r"D:\x.mp3", from, to), None);
+        assert_eq!(move_prefix("C:", from, to), None);
+    }
 
     #[test]
     fn expand_walks_folders_and_keeps_audio_only() {

@@ -1,0 +1,50 @@
+name: Bug
+description: Quelque chose ne marche pas comme prévu.
+labels: [bug]
+body:
+  - type: input
+    id: version
+    attributes:
+      label: Version de Bruitage
+      description: En bas des réglages, ou dans le nom de l'exe téléchargé.
+      placeholder: "0.4.2"
+    validations:
+      required: true
+  - type: input
+    id: windows
+    attributes:
+      label: Version de Windows
+      placeholder: "Windows 11 24H2"
+    validations:
+      required: true
+  - type: dropdown
+    id: mode
+    attributes:
+      label: Envoi aux autres
+      description: Réglages, « Envoi aux autres ».
+      options:
+        - Mon micro, avec le filtre
+        - Câble virtuel (VB-Cable ou autre)
+        - Désactivé
+    validations:
+      required: true
+  - type: textarea
+    id: steps
+    attributes:
+      label: Étapes pour le reproduire
+      placeholder: |
+        1. …
+        2. …
+    validations:
+      required: true
+  - type: textarea
+    id: expected
+    attributes:
+      label: Ce qui devait se passer, et ce qui se passe
+    validations:
+      required: true
+  - type: textarea
+    id: more
+    attributes:
+      label: Autre chose
+      description: Message d'erreur, capture, micro ou casque utilisés, appli qui écoute (Discord, jeu…).

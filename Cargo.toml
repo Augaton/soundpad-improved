@@ -1,8 +1,8 @@
 [package]
-name = "soundpad-improved"
-version = "0.3.0"
+name = "bruitage"
+version = "0.4.0"
 edition = "2024"
-description = "Soundboard polyphonique : plusieurs sons à la fois, volume réglable en direct, import de la bibliothèque Soundpad."
+description = "Soundboard polyphonique pour Windows : plusieurs sons à la fois, envoyés dans le vrai micro, raccourcis globaux, import de la bibliothèque Soundpad."
 publish = false
 
 [dependencies]

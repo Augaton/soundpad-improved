@@ -29,7 +29,7 @@ pub enum Command {
     Quit,
 }
 
-const CLASS: PCWSTR = w!("SoundpadImprovedTray");
+const CLASS: PCWSTR = w!("BruitageTray");
 const WM_SHOW: u32 = WM_APP + 2; // from a second instance: bring the window back
 const WM_TRAY: u32 = WM_APP + 1; // the icon's mouse events
 const ID_OPEN: i32 = 1;
@@ -157,7 +157,7 @@ unsafe fn add_icon(hwnd: HWND) {
         hIcon: HICON(*ICON.get_or_init(|| icon().map_or(0, |h| h.0 as isize)) as _),
         ..Default::default()
     };
-    copy_wide(&mut data.szTip, "Soundpad Improved");
+    copy_wide(&mut data.szTip, "Bruitage");
     unsafe {
         let _ = Shell_NotifyIconW(NIM_ADD, &data);
     }

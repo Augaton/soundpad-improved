@@ -24,9 +24,8 @@ use crate::store;
 
 pub const VOLUME_STEP: f32 = 0.1;
 const SAVE_DELAY: Duration = Duration::from_millis(400);
-pub const RELEASES: &str = "https://github.com/Augaton/soundpad-improved/releases/latest";
-const LATEST_RELEASE_API: &str =
-    "https://api.github.com/repos/Augaton/soundpad-improved/releases/latest";
+pub const RELEASES: &str = "https://github.com/Augaton/bruitage/releases/latest";
+const LATEST_RELEASE_API: &str = "https://api.github.com/repos/Augaton/bruitage/releases/latest";
 /// The version CI gives the exe ("0.2.13"); None for a build from the sources.
 pub const VERSION: Option<&str> = option_env!("SPI_VERSION");
 

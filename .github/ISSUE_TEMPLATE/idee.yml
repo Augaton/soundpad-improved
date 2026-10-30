@@ -1,0 +1,20 @@
+name: Idée
+description: Proposer une fonction ou une amélioration.
+labels: [idée]
+body:
+  - type: textarea
+    id: need
+    attributes:
+      label: Le besoin
+      description: Ce que tu essaies de faire, et ce qui t'en empêche aujourd'hui.
+    validations:
+      required: true
+  - type: textarea
+    id: idea
+    attributes:
+      label: L'idée
+      description: Comment Bruitage pourrait t'aider. Une autre appli qui le fait déjà, peut-être.
+  - type: textarea
+    id: more
+    attributes:
+      label: Autre chose

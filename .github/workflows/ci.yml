@@ -55,7 +55,7 @@ jobs:
       - uses: actions/upload-artifact@v4
         with:
           name: exe
-          path: target/release/soundpad-improved.exe
+          path: target/release/bruitage.exe
 
   # Every green push on main publishes the exe as a GitHub Release, under the build's version.
   release:
@@ -76,5 +76,5 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $v = "${{ needs.build.outputs.version }}"
-          Move-Item soundpad-improved.exe "Soundpad-Improved-$v.exe"
-          gh release create "v$v" "Soundpad-Improved-$v.exe" --target "${{ github.sha }}" --title "Soundpad Improved $v" --generate-notes
+          Move-Item bruitage.exe "Bruitage-$v.exe"
+          gh release create "v$v" "Bruitage-$v.exe" --target "${{ github.sha }}" --title "Bruitage $v" --generate-notes

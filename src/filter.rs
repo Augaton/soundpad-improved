@@ -7,6 +7,11 @@
 // PowerShell is started from System32 by its full path; it runs the script only if it has the
 // SHA-256 of the embedded one, from the very bytes it checked; and the installer checks the DLL
 // again once copied where only administrators can write, before Windows' audio engine loads it.
+//
+// The filter keeps the names it had when the app was called Soundpad Improved (its DLL, its
+// folder in Program Files, its registry keys, the ring's name): renamed, a filter already
+// installed would no longer be fed, and "Retirer le filtre" would not find the microphone's
+// original effect to give back.
 use std::fs;
 use std::os::windows::process::CommandExt;
 use std::path::{Path, PathBuf};
@@ -67,8 +72,7 @@ struct Staged {
 
 impl Staged {
     fn new(with_dll: bool) -> Result<Staged, String> {
-        let dir =
-            std::env::temp_dir().join(format!("soundpad-improved-{}", crate::model::new_id()));
+        let dir = std::env::temp_dir().join(format!("bruitage-{}", crate::model::new_id()));
         fs::create_dir(&dir).map_err(|e| e.to_string())?; // fails if it exists: this one is ours
         let mut staged = Staged {
             script: dir.join("mic-filter.ps1"),

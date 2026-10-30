@@ -652,7 +652,7 @@ impl App {
                 ui.add_space(6.0);
                 hint(ui, &format!("Ta bibliothèque : {}. Celle d’avant le dernier lancement est gardée dans library.json.bak.", crate::store::data_dir().join("library.json").display()));
                 if let Some(v) = crate::state::VERSION {
-                    hint(ui, &format!("Soundpad Improved {v}"));
+                    hint(ui, &format!("Bruitage {v}"));
                 }
                 ui.add_space(4.0);
             });
